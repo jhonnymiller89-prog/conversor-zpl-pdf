@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: conversor-zpl-pdf
+    runtime: node
+    plan: free
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: HOST=0.0.0.0 pnpm start
+    envVars:
+      - key: NODE_ENV
+        value: production
