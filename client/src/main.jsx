@@ -1,16 +1,22 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowDownToLine,
   CheckCircle2,
+  Eye,
   FileArchive,
   FileText,
+  History,
   LoaderCircle,
+  LockKeyhole,
   Plus,
+  RotateCw,
   Settings2,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   UploadCloud,
+  UserRound,
   X
 } from "lucide-react";
 import "./styles.css";
@@ -29,24 +35,58 @@ const DENSITIES = [
   { value: "24", label: "600 dpi", hint: "Alta definição" },
   { value: "6", label: "152 dpi", hint: "Legado" }
 ];
+const ROTATIONS = ["0", "90", "180", "270"];
+const SCALE_MODES = [
+  { value: "fit", label: "Encaixar" },
+  { value: "fill", label: "Preencher" },
+  { value: "original", label: "Original" }
+];
+const DEFAULT_SETTINGS = {
+  pageSize: "10x15",
+  density: "8",
+  rotation: "0",
+  marginMm: 0,
+  scaleMode: "fit"
+};
 
 function App() {
   const inputRef = useRef(null);
   const [files, setFiles] = useState([]);
-  const [pageSize, setPageSize] = useState("10x15");
-  const [density, setDensity] = useState("8");
+  const [rawZpl, setRawZpl] = useState("");
+  const [mode, setMode] = useState("upload");
+  const [settings, setSettings] = useState(loadStored("zpl-settings", DEFAULT_SETTINGS));
+  const [profile, setProfile] = useState(loadStored("zpl-profile", { name: "" }));
+  const [history, setHistory] = useState(loadStored("zpl-history", []));
   const [isDragging, setIsDragging] = useState(false);
-  const [isConverting, setIsConverting] = useState(false);
+  const [isWorking, setIsWorking] = useState("");
   const [error, setError] = useState("");
+  const [analysis, setAnalysis] = useState(null);
+  const [previews, setPreviews] = useState([]);
   const [result, setResult] = useState(null);
-  const [history, setHistory] = useState([]);
 
   const totalSize = useMemo(() => files.reduce((sum, item) => sum + item.file.size, 0), [files]);
-  const canConvert = files.length > 0 && !isConverting;
+  const hasInput = files.length > 0 || rawZpl.trim().length > 0;
+
+  useEffect(() => {
+    localStorage.setItem("zpl-settings", JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem("zpl-profile", JSON.stringify(profile));
+  }, [profile]);
+
+  useEffect(() => {
+    localStorage.setItem("zpl-history", JSON.stringify(history));
+  }, [history]);
+
+  function updateSetting(key, value) {
+    setSettings((current) => ({ ...current, [key]: value }));
+    clearOutput();
+  }
 
   function selectFiles(fileList) {
     setError("");
-    setResult(null);
+    clearOutput();
 
     const incoming = Array.from(fileList || []);
     if (!incoming.length) return;
@@ -69,53 +109,40 @@ function App() {
       }
     }
 
-    if (accepted.length) {
-      setFiles((current) => [...current, ...accepted]);
-    }
-
-    if (rejected.length) {
-      setError("Alguns arquivos foram ignorados. Use apenas .zpl, .txt ou .zip.");
-    }
+    if (accepted.length) setFiles((current) => [...current, ...accepted]);
+    if (rejected.length) setError("Alguns arquivos foram ignorados. Use apenas .zpl, .txt ou .zip.");
   }
 
-  async function convertFiles() {
-    if (!files.length) {
-      setError("Selecione ao menos um arquivo para converter.");
-      return;
-    }
+  async function analyzeInput() {
+    await runRequest("analyze", "/api/analyze", async (response) => {
+      setAnalysis(await response.json());
+      setPreviews([]);
+      setResult(null);
+    });
+  }
 
-    setIsConverting(true);
-    setError("");
-    setResult(null);
+  async function previewInput() {
+    await runRequest("preview", "/api/preview", async (response) => {
+      const payload = await response.json();
+      setAnalysis(payload);
+      setPreviews(payload.previews || []);
+      setResult(null);
+    });
+  }
 
-    const formData = new FormData();
-    files.forEach((item) => formData.append("files", item.file));
-    formData.append("pageSize", pageSize);
-    formData.append("density", density);
-
-    try {
-      const response = await fetch(`${API_URL}/api/convert`, {
-        method: "POST",
-        body: formData
-      });
-
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        throw new Error(payload?.error || "Não foi possível converter estes arquivos.");
-      }
-
+  async function convertInput() {
+    await runRequest("convert", "/api/convert", async (response) => {
       const blob = await response.blob();
       const downloadUrl = URL.createObjectURL(blob);
       const labelCount = response.headers.get("X-Label-Count") || "1";
-      const sourceCount = response.headers.get("X-Source-Count") || String(files.length);
+      const sourceCount = response.headers.get("X-Source-Count") || "1";
       const finalPageSize = response.headers.get("X-Page-Size") || currentPageSizeLabel();
-      const name = buildDownloadName();
       const nextResult = {
         url: downloadUrl,
         labelCount,
         sourceCount,
         pageSize: finalPageSize,
-        name,
+        name: buildDownloadName(),
         createdAt: new Date().toLocaleString("pt-BR", {
           dateStyle: "short",
           timeStyle: "short"
@@ -123,36 +150,79 @@ function App() {
       };
 
       setResult(nextResult);
-      setHistory((current) => [nextResult, ...current].slice(0, 5));
-    } catch (conversionError) {
-      setError(conversionError.message);
-    } finally {
-      setIsConverting(false);
+      setHistory((current) => [nextResult, ...current].slice(0, 10));
+    });
+  }
+
+  async function runRequest(action, endpoint, onSuccess) {
+    if (!hasInput) {
+      setError("Envie arquivos ou cole um código ZPL para continuar.");
+      return;
     }
+
+    setIsWorking(action);
+    setError("");
+
+    try {
+      const response = await fetch(`${API_URL}${endpoint}`, {
+        method: "POST",
+        body: buildFormData()
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Não foi possível processar a solicitação.");
+      }
+
+      await onSuccess(response);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsWorking("");
+    }
+  }
+
+  function buildFormData() {
+    const formData = new FormData();
+    files.forEach((item) => formData.append("files", item.file));
+    formData.append("rawZpl", rawZpl);
+    formData.append("pageSize", settings.pageSize);
+    formData.append("density", settings.density);
+    formData.append("rotation", settings.rotation);
+    formData.append("marginMm", settings.marginMm);
+    formData.append("scaleMode", settings.scaleMode);
+    return formData;
   }
 
   function removeFile(id) {
     setFiles((current) => current.filter((item) => item.id !== id));
-    setResult(null);
+    clearOutput();
   }
 
   function clearAll() {
     setFiles([]);
+    setRawZpl("");
     setError("");
-    setResult(null);
+    clearOutput();
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  function clearOutput() {
+    setAnalysis(null);
+    setPreviews([]);
+    setResult(null);
+  }
+
   function buildDownloadName() {
-    if (files.length === 1) {
-      return `${files[0].file.name.replace(/\.[^.]+$/, "") || "etiquetas"}-${pageSize}.pdf`;
+    if (files.length === 1 && !rawZpl.trim()) {
+      return `${files[0].file.name.replace(/\.[^.]+$/, "") || "etiquetas"}-${settings.pageSize}.pdf`;
     }
 
-    return `etiquetas-convertidas-${pageSize}.pdf`;
+    return `etiquetas-convertidas-${settings.pageSize}.pdf`;
   }
 
   function currentPageSizeLabel() {
-    return PAGE_SIZES.find((item) => item.value === pageSize)?.label || "10 x 15 cm";
+    return PAGE_SIZES.find((item) => item.value === settings.pageSize)?.label || "10 x 15 cm";
   }
 
   return (
@@ -162,44 +232,24 @@ function App() {
           <span className="eyebrow">Conversor ZPL online</span>
           <h1>ZPL para PDF profissional</h1>
           <p>
-            Envie um ou vários arquivos de etiquetas, ajuste o formato de impressão e baixe um PDF
-            pronto para usar.
+            Envie arquivos, cole ZPL, valide o conteúdo, visualize etiquetas e gere PDFs prontos
+            para impressão térmica.
           </p>
 
-          <div className="stats-grid" aria-label="Recursos do conversor">
-            <article>
-              <FileText size={21} aria-hidden="true" />
-              <div>
-                <strong>Blocos ^XA/^XZ</strong>
-                <span>Separa múltiplas etiquetas automaticamente.</span>
-              </div>
-            </article>
-            <article>
-              <FileArchive size={21} aria-hidden="true" />
-              <div>
-                <strong>ZIP, TXT e ZPL</strong>
-                <span>Processa arquivos avulsos ou compactados.</span>
-              </div>
-            </article>
-            <article>
-              <ShieldCheck size={21} aria-hidden="true" />
-              <div>
-                <strong>PDF padronizado</strong>
-                <span>Gera páginas no tamanho selecionado.</span>
-              </div>
-            </article>
-          </div>
+          <LocalPanel profile={profile} setProfile={setProfile} history={history} setHistory={setHistory} />
         </aside>
 
         <section className="converter-panel" aria-label="Conversor de etiquetas ZPL para PDF">
           <div className="panel-header">
             <div>
-              <strong>Arquivos para conversão</strong>
+              <strong>Entrada da conversão</strong>
               <span>
-                {files.length ? `${files.length} arquivo(s), ${formatBytes(totalSize)}` : "Nenhum arquivo selecionado"}
+                {files.length || rawZpl.trim()
+                  ? `${files.length} arquivo(s), ${formatBytes(totalSize)}${rawZpl.trim() ? " + ZPL colado" : ""}`
+                  : "Envie arquivos ou cole o ZPL"}
               </span>
             </div>
-            {files.length > 0 && (
+            {hasInput && (
               <button className="ghost-button" onClick={clearAll}>
                 <Trash2 size={17} aria-hidden="true" />
                 Limpar
@@ -207,80 +257,47 @@ function App() {
             )}
           </div>
 
-          <div
-            className={`dropzone ${isDragging ? "is-dragging" : ""}`}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              setIsDragging(false);
-              selectFiles(event.dataTransfer.files);
-            }}
-            onClick={() => inputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
-            }}
-          >
-            <input
-              ref={inputRef}
-              type="file"
-              accept=".zpl,.txt,.zip"
-              multiple
-              onChange={(event) => selectFiles(event.target.files)}
-            />
-            <div className="upload-icon">
-              <UploadCloud size={34} aria-hidden="true" />
-            </div>
-            <strong>Arraste arquivos aqui</strong>
-            <span>ou clique para adicionar .zpl, .txt e .zip</span>
+          <div className="tabs" role="tablist" aria-label="Tipo de entrada">
+            <button className={mode === "upload" ? "is-selected" : ""} onClick={() => setMode("upload")}>
+              <UploadCloud size={17} aria-hidden="true" />
+              Arquivo
+            </button>
+            <button className={mode === "paste" ? "is-selected" : ""} onClick={() => setMode("paste")}>
+              <FileText size={17} aria-hidden="true" />
+              Colar ZPL
+            </button>
           </div>
 
-          {files.length > 0 && (
-            <div className="file-list" aria-label="Arquivos selecionados">
-              {files.map((item) => (
-                <FileItem key={item.id} item={item} onRemove={() => removeFile(item.id)} />
-              ))}
-            </div>
+          {mode === "upload" ? (
+            <UploadArea
+              inputRef={inputRef}
+              files={files}
+              isDragging={isDragging}
+              setIsDragging={setIsDragging}
+              selectFiles={selectFiles}
+              removeFile={removeFile}
+            />
+          ) : (
+            <textarea
+              className="zpl-editor"
+              value={rawZpl}
+              onChange={(event) => {
+                setRawZpl(event.target.value);
+                clearOutput();
+              }}
+              placeholder="Cole aqui o conteúdo ZPL iniciado por ^XA e finalizado por ^XZ"
+            />
           )}
 
-          <section className="options-panel" aria-label="Opções de conversão">
-            <div className="section-title">
-              <Settings2 size={19} aria-hidden="true" />
-              <strong>Configurações</strong>
-            </div>
-
-            <label>
-              Tamanho da página
-              <select value={pageSize} onChange={(event) => setPageSize(event.target.value)}>
-                {PAGE_SIZES.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="density-group" role="group" aria-label="Resolução da impressora">
-              {DENSITIES.map((item) => (
-                <button
-                  key={item.value}
-                  className={density === item.value ? "is-selected" : ""}
-                  onClick={() => setDensity(item.value)}
-                  type="button"
-                >
-                  <strong>{item.label}</strong>
-                  <span>{item.hint}</span>
-                </button>
-              ))}
-            </div>
-          </section>
+          <SettingsPanel settings={settings} updateSetting={updateSetting} />
 
           {error && <p className="message error">{error}</p>}
+
+          {analysis && <AnalysisPanel analysis={analysis} />}
+
+          {previews.length > 0 && (
+            <PreviewPanel previews={previews} total={analysis?.labelsCount || previews.length} limit={analysis?.previewLimit} />
+          )}
 
           {result && (
             <div className="result-box">
@@ -295,8 +312,16 @@ function App() {
           )}
 
           <div className="actions">
-            <button className="primary-button" onClick={convertFiles} disabled={!canConvert}>
-              {isConverting ? (
+            <button className="secondary-button" onClick={analyzeInput} disabled={!!isWorking || !hasInput}>
+              {isWorking === "analyze" ? <LoaderCircle className="spin" size={19} /> : <SlidersHorizontal size={19} />}
+              Analisar
+            </button>
+            <button className="secondary-button" onClick={previewInput} disabled={!!isWorking || !hasInput}>
+              {isWorking === "preview" ? <LoaderCircle className="spin" size={19} /> : <Eye size={19} />}
+              Pré-visualizar
+            </button>
+            <button className="primary-button" onClick={convertInput} disabled={!!isWorking || !hasInput}>
+              {isWorking === "convert" ? (
                 <>
                   <LoaderCircle className="spin" size={20} aria-hidden="true" />
                   Convertendo
@@ -304,16 +329,10 @@ function App() {
               ) : (
                 <>
                   <ArrowDownToLine size={20} aria-hidden="true" />
-                  Converter para PDF
+                  Gerar PDF
                 </>
               )}
             </button>
-
-            <button className="secondary-button" onClick={() => inputRef.current?.click()}>
-              <Plus size={19} aria-hidden="true" />
-              Adicionar
-            </button>
-
             {result && (
               <a className="download-button" href={result.url} download={result.name}>
                 Baixar PDF
@@ -323,25 +342,254 @@ function App() {
         </section>
       </section>
 
-      {history.length > 0 && (
-        <section className="history-panel" aria-label="Histórico da sessão">
-          <div className="section-title">
-            <CheckCircle2 size={19} aria-hidden="true" />
-            <strong>Últimas conversões</strong>
-          </div>
-          <div className="history-list">
-            {history.map((item) => (
-              <a key={`${item.createdAt}-${item.name}`} href={item.url} download={item.name}>
-                <span>{item.name}</span>
-                <small>
-                  {item.labelCount} etiqueta(s) - {item.createdAt}
-                </small>
-              </a>
-            ))}
-          </div>
-        </section>
-      )}
+      <TrustSections />
     </main>
+  );
+}
+
+function UploadArea({ inputRef, files, isDragging, setIsDragging, selectFiles, removeFile }) {
+  return (
+    <>
+      <div
+        className={`dropzone ${isDragging ? "is-dragging" : ""}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setIsDragging(true);
+        }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setIsDragging(false);
+          selectFiles(event.dataTransfer.files);
+        }}
+        onClick={() => inputRef.current?.click()}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".zpl,.txt,.zip"
+          multiple
+          onChange={(event) => selectFiles(event.target.files)}
+        />
+        <div className="upload-icon">
+          <UploadCloud size={34} aria-hidden="true" />
+        </div>
+        <strong>Arraste arquivos aqui</strong>
+        <span>ou clique para adicionar .zpl, .txt e .zip</span>
+      </div>
+
+      {files.length > 0 && (
+        <div className="file-list" aria-label="Arquivos selecionados">
+          {files.map((item) => (
+            <FileItem key={item.id} item={item} onRemove={() => removeFile(item.id)} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function SettingsPanel({ settings, updateSetting }) {
+  return (
+    <section className="options-panel" aria-label="Opções de conversão">
+      <div className="section-title">
+        <Settings2 size={19} aria-hidden="true" />
+        <strong>Configurações de impressão</strong>
+      </div>
+
+      <div className="settings-grid">
+        <label>
+          Tamanho
+          <select value={settings.pageSize} onChange={(event) => updateSetting("pageSize", event.target.value)}>
+            {PAGE_SIZES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Escala
+          <select value={settings.scaleMode} onChange={(event) => updateSetting("scaleMode", event.target.value)}>
+            {SCALE_MODES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Margem: {settings.marginMm} mm
+          <input
+            type="range"
+            min="0"
+            max="20"
+            value={settings.marginMm}
+            onChange={(event) => updateSetting("marginMm", event.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="density-group" role="group" aria-label="Resolução da impressora">
+        {DENSITIES.map((item) => (
+          <button
+            key={item.value}
+            className={settings.density === item.value ? "is-selected" : ""}
+            onClick={() => updateSetting("density", item.value)}
+            type="button"
+          >
+            <strong>{item.label}</strong>
+            <span>{item.hint}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="rotation-group" role="group" aria-label="Rotação da etiqueta">
+        {ROTATIONS.map((rotation) => (
+          <button
+            key={rotation}
+            className={settings.rotation === rotation ? "is-selected" : ""}
+            onClick={() => updateSetting("rotation", rotation)}
+            type="button"
+          >
+            <RotateCw size={16} aria-hidden="true" />
+            {rotation}°
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AnalysisPanel({ analysis }) {
+  return (
+    <section className="analysis-panel" aria-label="Resumo da análise">
+      <div className="metric">
+        <strong>{analysis.labelsCount}</strong>
+        <span>etiqueta(s)</span>
+      </div>
+      <div className="metric">
+        <strong>{analysis.sourcesCount}</strong>
+        <span>origem(ns)</span>
+      </div>
+      <div className="source-list">
+        {analysis.sources.slice(0, 4).map((source) => (
+          <span key={source.name}>
+            {source.name} - {source.labelsCount} etiqueta(s)
+          </span>
+        ))}
+      </div>
+      {analysis.warnings?.map((warning) => (
+        <p className="message warning" key={warning}>
+          {warning}
+        </p>
+      ))}
+    </section>
+  );
+}
+
+function PreviewPanel({ previews, total, limit }) {
+  return (
+    <section className="preview-panel" aria-label="Pré-visualização das etiquetas">
+      <div className="section-title">
+        <Eye size={19} aria-hidden="true" />
+        <strong>Pré-visualização</strong>
+        {total > previews.length && <span>mostrando {limit} de {total}</span>}
+      </div>
+      <div className="preview-grid">
+        {previews.map((preview, index) => (
+          <article key={`${preview.sourceName}-${preview.index}-${index}`}>
+            <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
+            <span>
+              {preview.sourceName} #{preview.index}
+            </span>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LocalPanel({ profile, setProfile, history, setHistory }) {
+  return (
+    <section className="local-panel" aria-label="Painel local">
+      <div className="section-title">
+        <UserRound size={19} aria-hidden="true" />
+        <strong>Painel local</strong>
+      </div>
+      <label>
+        Nome do usuário
+        <input
+          value={profile.name}
+          onChange={(event) => setProfile({ name: event.target.value })}
+          placeholder="Seu nome ou empresa"
+        />
+      </label>
+      <div className="mini-status">
+        <History size={17} aria-hidden="true" />
+        <span>{history.length} conversão(ões) salvas neste navegador</span>
+      </div>
+      {history.length > 0 && (
+        <div className="history-list">
+          {history.slice(0, 4).map((item) => (
+            <a key={`${item.createdAt}-${item.name}`} href={item.url} download={item.name}>
+              <span>{item.name}</span>
+              <small>
+                {item.labelCount} etiqueta(s) - {item.createdAt}
+              </small>
+            </a>
+          ))}
+          <button className="ghost-button" onClick={() => setHistory([])}>
+            <Trash2 size={16} aria-hidden="true" />
+            Limpar histórico
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TrustSections() {
+  return (
+    <section className="trust-layout">
+      <article>
+        <ShieldCheck size={22} aria-hidden="true" />
+        <div>
+          <strong>Privacidade</strong>
+          <p>
+            Os arquivos são usados apenas durante a conversão. O serviço não cria banco de dados nem
+            mantém histórico no servidor.
+          </p>
+        </div>
+      </article>
+      <article>
+        <LockKeyhole size={22} aria-hidden="true" />
+        <div>
+          <strong>Uso profissional</strong>
+          <p>
+            O conversor suporta etiquetas de marketplaces, transportadoras e sistemas ERP que geram
+            ZPL padrão.
+          </p>
+        </div>
+      </article>
+      <article>
+        <FileText size={22} aria-hidden="true" />
+        <div>
+          <strong>Perguntas rápidas</strong>
+          <p>
+            Use 203 dpi para impressoras térmicas comuns. Se a etiqueta cortar, teste encaixar,
+            margem maior ou rotação.
+          </p>
+        </div>
+      </article>
+    </section>
   );
 }
 
@@ -360,6 +608,15 @@ function FileItem({ item, onRemove }) {
       </button>
     </div>
   );
+}
+
+function loadStored(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function formatBytes(bytes) {
