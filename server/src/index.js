@@ -13,19 +13,20 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 25 * 1024 * 1024,
-    files: 1
+    files: 20
   }
 });
 
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || "127.0.0.1";
-const LABEL_WIDTH_CM = 10;
-const LABEL_HEIGHT_CM = 15;
 const CM_TO_POINTS = 28.3464567;
-const PDF_WIDTH = LABEL_WIDTH_CM * CM_TO_POINTS;
-const PDF_HEIGHT = LABEL_HEIGHT_CM * CM_TO_POINTS;
-const LABELARY_SIZE_INCHES = "3.94x5.91";
-const LABELARY_URL = `https://api.labelary.com/v1/printers/8dpmm/labels/${LABELARY_SIZE_INCHES}/0/`;
+const LABEL_PRESETS = {
+  "10x15": { label: "10 x 15 cm", widthCm: 10, heightCm: 15, labelarySize: "3.94x5.91" },
+  "10x10": { label: "10 x 10 cm", widthCm: 10, heightCm: 10, labelarySize: "3.94x3.94" },
+  "10x7": { label: "10 x 7 cm", widthCm: 10, heightCm: 7, labelarySize: "3.94x2.76" },
+  "10x5": { label: "10 x 5 cm", widthCm: 10, heightCm: 5, labelarySize: "3.94x1.97" }
+};
+const ALLOWED_DENSITIES = new Set(["6", "8", "12", "24"]);
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
 app.use(express.json());
@@ -34,13 +35,14 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/api/convert", upload.single("file"), async (req, res) => {
+app.post("/api/convert", upload.array("files", 20), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "Envie um arquivo .zpl, .txt ou .zip." });
+    if (!req.files?.length) {
+      return res.status(400).json({ error: "Envie ao menos um arquivo .zpl, .txt ou .zip." });
     }
 
-    const sources = extractSources(req.file);
+    const settings = getConversionSettings(req.body);
+    const sources = req.files.flatMap(extractSources);
     const labels = sources.flatMap((source) =>
       extractPrintableLabels(source.content).map((zpl, index) => ({
         zpl,
@@ -58,23 +60,30 @@ app.post("/api/convert", upload.single("file"), async (req, res) => {
     const pdf = await PDFDocument.create();
 
     for (const label of labels) {
-      const pngBytes = await renderZplToPng(label.zpl);
+      const pngBytes = await renderZplToPng(label.zpl, settings);
       const image = await pdf.embedPng(pngBytes);
-      const page = pdf.addPage([PDF_WIDTH, PDF_HEIGHT]);
+      const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
       page.drawImage(image, {
         x: 0,
         y: 0,
-        width: PDF_WIDTH,
-        height: PDF_HEIGHT
+        width: settings.pdfWidth,
+        height: settings.pdfHeight
       });
     }
 
     const pdfBytes = await pdf.save();
-    const safeBaseName = req.file.originalname.replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "-");
+    const baseName =
+      req.files.length === 1 ? req.files[0].originalname.replace(/\.[^.]+$/, "") : "etiquetas-convertidas";
+    const safeBaseName = baseName.replace(/[^\w.-]+/g, "-");
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${safeBaseName || "etiquetas"}-10x15.pdf"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeBaseName || "etiquetas"}-${settings.pageSize}.pdf"`
+    );
     res.setHeader("X-Label-Count", String(labels.length));
+    res.setHeader("X-Source-Count", String(sources.length));
+    res.setHeader("X-Page-Size", settings.preset.label);
     res.send(Buffer.from(pdfBytes));
   } catch (error) {
     console.error(error);
@@ -142,8 +151,23 @@ function isPrintableLabel(label) {
   return hasPrintableCommand && !deletesResource;
 }
 
-async function renderZplToPng(zpl) {
-  const response = await fetch(LABELARY_URL, {
+function getConversionSettings(body) {
+  const pageSize = LABEL_PRESETS[body?.pageSize] ? body.pageSize : "10x15";
+  const density = ALLOWED_DENSITIES.has(String(body?.density)) ? String(body.density) : "8";
+  const preset = LABEL_PRESETS[pageSize];
+
+  return {
+    pageSize,
+    density,
+    preset,
+    pdfWidth: preset.widthCm * CM_TO_POINTS,
+    pdfHeight: preset.heightCm * CM_TO_POINTS,
+    labelaryUrl: `https://api.labelary.com/v1/printers/${density}dpmm/labels/${preset.labelarySize}/0/`
+  };
+}
+
+async function renderZplToPng(zpl, settings) {
+  const response = await fetch(settings.labelaryUrl, {
     method: "POST",
     headers: {
       Accept: "image/png",
