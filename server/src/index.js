@@ -846,11 +846,35 @@ async function prepareChecklistFooterImage(pngBytes) {
     }
 
     ranked.sort((a, b) => b.score - a.score);
-    return ranked[0]?.buffer || Buffer.from(pngBytes);
+    return ranked[0] ? await orientFooterImage(ranked[0].buffer) : Buffer.from(pngBytes);
   } catch (error) {
     console.warn("Recorte do checklist indisponível:", error?.message || error);
     return Buffer.from(pngBytes);
   }
+}
+
+async function orientFooterImage(imageBytes) {
+  const { default: sharp } = await import("sharp");
+  const oriented = [];
+
+  for (const rotation of [180, 0, 90, 270]) {
+    const buffer = await sharp(imageBytes)
+      .rotate(rotation)
+      .flatten({ background: "#ffffff" })
+      .png()
+      .toBuffer();
+    const metadata = await sharp(buffer).metadata();
+    const ink = await getInkStats(buffer);
+    if (!metadata.width || !metadata.height || ink.darkPixels < 80) continue;
+
+    oriented.push({
+      buffer,
+      score: scoreFinalFooterOrientation(metadata.width, metadata.height, ink, rotation)
+    });
+  }
+
+  oriented.sort((a, b) => b.score - a.score);
+  return oriented[0]?.buffer || imageBytes;
 }
 
 async function cropImageToInk(imageBytes) {
@@ -924,6 +948,16 @@ function scoreFooterImageCandidate(width, height, darkPixels) {
   const veryTallPenalty = ratio < 1.2 ? 900000 : 0;
 
   return darkPixels * 10 + area + wideBonus + tableRatioBonus - veryTallPenalty;
+}
+
+function scoreFinalFooterOrientation(width, height, ink, rotation) {
+  const ratio = width / Math.max(height, 1);
+  const wideScore = ratio >= 1 ? ratio * 100000 : -500000;
+  const centeredInkScore = (ink.maxY - ink.minY + 1) / Math.max(height, 1);
+  const upsideDownPenalty = ink.minY < height * 0.08 ? 80000 : 0;
+  const knownChecklistBonus = rotation === 180 ? 90000 : 0;
+
+  return wideScore + centeredInkScore * 50000 + ink.darkPixels + knownChecklistBonus - upsideDownPenalty;
 }
 
 function scoreOcrText(text) {
