@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 import {
   PDFDocument,
   StandardFonts,
+  clip,
   degrees,
+  endPath,
+  popGraphicsState,
+  pushGraphicsState,
+  rectangle,
   rgb
 } from "pdf-lib";
 
@@ -502,13 +507,13 @@ function drawImageFooter(page, image, settings, label) {
   const targetHeight = Math.max(footerHeight - padding * 2, 1);
   const rotatedWidth = image.height;
   const rotatedHeight = image.width;
-  const scale = Math.min(targetWidth / rotatedWidth, targetHeight / rotatedHeight);
+  const scale = Math.max(targetWidth / rotatedWidth, targetHeight / (rotatedHeight * 0.28));
   const drawWidth = image.width * scale;
   const drawHeight = image.height * scale;
   const boxWidth = rotatedWidth * scale;
   const boxHeight = rotatedHeight * scale;
   const left = padding + (targetWidth - boxWidth) / 2;
-  const bottom = padding + (targetHeight - boxHeight) / 2;
+  const bottom = padding + (targetHeight - boxHeight) / 2 - boxHeight * 0.34;
 
   page.drawRectangle({
     x: 0,
@@ -520,17 +525,28 @@ function drawImageFooter(page, image, settings, label) {
     borderWidth: 0.6
   });
 
-  page.drawImage(image, {
-    x: left + boxWidth,
-    y: bottom,
-    width: drawWidth,
-    height: drawHeight,
-    rotate: degrees(90)
-  });
+  page.pushOperators(
+    pushGraphicsState(),
+    rectangle(padding, padding, targetWidth, targetHeight),
+    clip(),
+    endPath()
+  );
+
+  try {
+    page.drawImage(image, {
+      x: left,
+      y: bottom + boxHeight,
+      width: drawWidth,
+      height: drawHeight,
+      rotate: degrees(270)
+    });
+  } finally {
+    page.pushOperators(popGraphicsState());
+  }
 }
 
 function getFooterHeightMm(label, settings) {
-  if (label.productFooterZpl) return 26;
+  if (label.productFooterZpl) return 23;
   return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
