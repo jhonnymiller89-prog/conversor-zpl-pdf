@@ -423,7 +423,10 @@ function getProtectedAreaForLabel(label, settings) {
 
   return {
     ...settings.template.protectedArea,
-    heightMm: clampNumber(150 - getFooterHeightMm(label, settings), 120, 150)
+    xMm: 2,
+    yMm: 2,
+    widthMm: 96,
+    heightMm: clampNumber(150 - getFooterHeightMm(label, settings) - 2, 118, 150)
   };
 }
 
@@ -545,7 +548,7 @@ function drawImageFooter(page, image, settings, label) {
 }
 
 function getFooterHeightMm(label, settings) {
-  if (label.productFooterZpl) return 22;
+  if (label.productFooterZpl) return 18;
   return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
