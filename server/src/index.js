@@ -4,7 +4,7 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PDFDocument, degrees } from "pdf-lib";
+import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +33,32 @@ const LABEL_PRESETS = {
 const ALLOWED_DENSITIES = new Set(["6", "8", "12", "24"]);
 const ALLOWED_ROTATIONS = new Set(["0", "90", "180", "270"]);
 const ALLOWED_SCALE_MODES = new Set(["fit", "fill", "original"]);
+const PRODUCT_FONT_SIZES = {
+  auto: { label: "Automático", min: 6, max: 9 },
+  small: { label: "Pequeno", min: 6, max: 7 },
+  medium: { label: "Médio", min: 7, max: 9 },
+  large: { label: "Grande", min: 8, max: 11 }
+};
+const DEFAULT_TEMPLATE = {
+  id: "jm-cosmeticos",
+  name: "JM Cosméticos",
+  protectedArea: { xMm: 0, yMm: 0, widthMm: 100, heightMm: 120 },
+  footer: {
+    enabled: true,
+    heightMm: 30,
+    gapMm: 0,
+    paddingMm: 3,
+    showSku: true,
+    showTotalItems: true,
+    showQuantity: true,
+    showMarker: true,
+    marker: "✓",
+    fontSize: "auto",
+    lineSpacing: 1.08,
+    align: "left",
+    textColor: "#111827"
+  }
+};
 let lastLabelaryRequestAt = 0;
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
@@ -65,6 +91,7 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
         globalIndex,
         sourceName: label.sourceName,
         index: label.index,
+        productFooter: label.productFooter,
         image: `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`
       });
     }
@@ -89,7 +116,7 @@ app.post("/api/convert", upload.array("files", 20), async (req, res) => {
       const pngBytes = await renderZplToPng(label.zpl, settings);
       const image = await pdf.embedPng(pngBytes);
       const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
-      drawLabelImage(page, image, settings);
+      await drawLabelPage(pdf, page, image, settings, label);
     }
 
     const pdfBytes = await pdf.save();
@@ -119,7 +146,7 @@ app.post("/api/convert-label", upload.array("files", 20), async (req, res) => {
     const pngBytes = await renderZplToPng(label.zpl, settings);
     const image = await pdf.embedPng(pngBytes);
     const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
-    drawLabelImage(page, image, settings);
+    await drawLabelPage(pdf, page, image, settings, label);
 
     const pdfBytes = await pdf.save();
     const safeBaseName = payload.baseName.replace(/[^\w.-]+/g, "-");
@@ -159,8 +186,9 @@ function buildLabelPayload(req) {
   }
 
   const labels = sources.flatMap((source) =>
-    extractPrintableLabels(source.content).map((zpl, index) => ({
-      zpl,
+    extractPrintableLabels(source.content).map((entry, index) => ({
+      zpl: entry.zpl,
+      productFooter: entry.productFooter,
       sourceName: source.name,
       index: index + 1
     }))
@@ -261,7 +289,10 @@ function extractPrintableLabels(content) {
 
     if (!isPrintableLabel(label)) continue;
 
-    labels.push(localPrefix ? `${localPrefix}\n${label}` : label);
+    labels.push({
+      zpl: localPrefix ? `${localPrefix}\n${label}` : label,
+      productFooter: extractProductFooter(localPrefix, label)
+    });
   }
 
   return labels;
@@ -303,6 +334,7 @@ function getConversionSettings(body) {
   const scaleMode = ALLOWED_SCALE_MODES.has(String(body?.scaleMode)) ? body.scaleMode : "fit";
   const marginMm = clampNumber(Number(body?.marginMm ?? 0), 0, 20);
   const preset = LABEL_PRESETS[pageSize];
+  const template = getTemplateSettings(body);
 
   return {
     pageSize,
@@ -311,16 +343,33 @@ function getConversionSettings(body) {
     scaleMode,
     marginPoints: marginMm * MM_TO_POINTS,
     preset,
+    template,
     pdfWidth: preset.widthCm * CM_TO_POINTS,
     pdfHeight: preset.heightCm * CM_TO_POINTS,
     labelaryUrl: `https://api.labelary.com/v1/printers/${density}dpmm/labels/${preset.labelarySize}/0/`
   };
 }
 
-function drawLabelImage(page, image, settings) {
+async function drawLabelPage(pdf, page, image, settings, label) {
+  const hasProductFooter = Boolean(label.productFooter?.lines?.length && settings.template.footer.enabled);
+
+  if (!hasProductFooter) {
+    drawLabelImage(page, image, settings, null);
+    return;
+  }
+
+  drawLabelImage(page, image, settings, settings.template.protectedArea);
+  await drawProductFooter(pdf, page, label.productFooter, settings);
+}
+
+function drawLabelImage(page, image, settings, area) {
   const pageWidth = settings.pdfWidth;
   const pageHeight = settings.pdfHeight;
   const margin = settings.marginPoints;
+  const areaX = area ? area.xMm * MM_TO_POINTS : 0;
+  const areaY = area ? area.yMm * MM_TO_POINTS : 0;
+  const areaWidth = area ? area.widthMm * MM_TO_POINTS : pageWidth;
+  const areaHeight = area ? area.heightMm * MM_TO_POINTS : pageHeight;
   const contentWidth = Math.max(pageWidth - margin * 2, 1);
   const contentHeight = Math.max(pageHeight - margin * 2, 1);
   const sourceWidth = image.width;
@@ -328,16 +377,18 @@ function drawLabelImage(page, image, settings) {
   const rotated = settings.rotation === 90 || settings.rotation === 270;
   const imageBoxWidth = rotated ? sourceHeight : sourceWidth;
   const imageBoxHeight = rotated ? sourceWidth : sourceHeight;
-  const fitScale = Math.min(contentWidth / imageBoxWidth, contentHeight / imageBoxHeight);
-  const fillScale = Math.max(contentWidth / imageBoxWidth, contentHeight / imageBoxHeight);
+  const targetWidth = Math.max(Math.min(areaWidth, contentWidth), 1);
+  const targetHeight = Math.max(Math.min(areaHeight, contentHeight), 1);
+  const fitScale = Math.min(targetWidth / imageBoxWidth, targetHeight / imageBoxHeight);
+  const fillScale = Math.max(targetWidth / imageBoxWidth, targetHeight / imageBoxHeight);
   const scale =
     settings.scaleMode === "original" ? fitScale : settings.scaleMode === "fill" ? fillScale : fitScale;
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
   const boxWidth = imageBoxWidth * scale;
   const boxHeight = imageBoxHeight * scale;
-  const left = margin + (contentWidth - boxWidth) / 2;
-  const bottom = margin + (contentHeight - boxHeight) / 2;
+  const left = margin + areaX + (targetWidth - boxWidth) / 2;
+  const bottom = pageHeight - margin - areaY - targetHeight + (targetHeight - boxHeight) / 2;
 
   if (settings.rotation === 90) {
     page.drawImage(image, {
@@ -378,6 +429,267 @@ function drawLabelImage(page, image, settings) {
     width: drawWidth,
     height: drawHeight
   });
+}
+
+async function drawProductFooter(pdf, page, productFooter, settings) {
+  const template = settings.template;
+  const footer = template.footer;
+  const regularFont = await pdf.embedFont(StandardFonts.Helvetica);
+  const boldFont = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const footerHeight = footer.heightMm * MM_TO_POINTS;
+  const padding = footer.paddingMm * MM_TO_POINTS;
+  const x = padding;
+  const y = padding;
+  const width = settings.pdfWidth - padding * 2;
+  const height = Math.min(footerHeight, settings.pdfHeight - padding * 2);
+  const color = hexToRgb(footer.textColor);
+  const headerParts = [];
+
+  if (footer.showSku && productFooter.skuCount) headerParts.push(`SKU: ${productFooter.skuCount}`);
+  if (footer.showTotalItems && productFooter.itemsCount) headerParts.push(`ITENS: ${productFooter.itemsCount}`);
+
+  page.drawRectangle({
+    x: 0,
+    y: 0,
+    width: settings.pdfWidth,
+    height: footerHeight,
+    color: rgb(1, 1, 1),
+    borderColor: rgb(0.78, 0.82, 0.88),
+    borderWidth: 0.6
+  });
+
+  const lines = buildFooterLines(productFooter, footer);
+  const fontSize = pickFooterFontSize(lines, width, height, regularFont, boldFont, footer, headerParts.length > 0);
+  const lineHeight = fontSize * footer.lineSpacing;
+  let cursorY = y + height - fontSize - 2;
+
+  if (headerParts.length) {
+    page.drawText(toPdfSafeText(headerParts.join(" - ")), {
+      x,
+      y: cursorY,
+      size: fontSize + 0.8,
+      font: boldFont,
+      color
+    });
+    cursorY -= lineHeight + 2;
+  }
+
+  for (const line of lines) {
+    for (const wrapped of wrapText(line, width, regularFont, fontSize)) {
+      if (cursorY < y) return;
+      page.drawText(toPdfSafeText(wrapped), {
+        x,
+        y: cursorY,
+        size: fontSize,
+        font: regularFont,
+        color
+      });
+      cursorY -= lineHeight;
+    }
+  }
+}
+
+function buildFooterLines(productFooter, footer) {
+  return productFooter.lines.map((item) => {
+    const parts = [];
+    if (footer.showMarker && footer.marker) parts.push("-");
+    if (footer.showQuantity && item.quantity) parts.push(`${item.quantity}x`);
+    parts.push(item.text);
+    return parts.join(" ");
+  });
+}
+
+function pickFooterFontSize(lines, width, height, regularFont, boldFont, footer, hasHeader) {
+  const sizeRange = PRODUCT_FONT_SIZES[footer.fontSize] || PRODUCT_FONT_SIZES.auto;
+
+  for (let size = sizeRange.max; size >= sizeRange.min; size -= 0.5) {
+    const lineHeight = size * footer.lineSpacing;
+    const wrappedCount = lines.reduce((sum, line) => sum + wrapText(line, width, regularFont, size).length, 0);
+    const headerHeight = hasHeader ? lineHeight + 2 : 0;
+    const totalHeight = headerHeight + wrappedCount * lineHeight;
+    const longestHeader = hasHeader ? boldFont.widthOfTextAtSize("SKU: 999 • ITENS: 999", size + 0.8) : 0;
+
+    if (totalHeight <= height && longestHeader <= width) return size;
+  }
+
+  return sizeRange.min;
+}
+
+function wrapText(text, width, font, size) {
+  const words = toPdfSafeText(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+
+    if (font.widthOfTextAtSize(candidate, size) <= width) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) lines.push(current);
+    current = word;
+  }
+
+  if (current) lines.push(current);
+  return lines.length ? lines : [String(text)];
+}
+
+function extractProductFooter(prefix, label) {
+  const candidates = [
+    ...extractPlainProductLines(prefix),
+    ...extractPlainProductLines(label),
+    ...extractFdFields(label)
+  ];
+  const usable = normalizeProductCandidates(candidates);
+
+  if (!usable.lines.length) return null;
+  return usable;
+}
+
+function extractPlainProductLines(text) {
+  return String(text)
+    .replace(/:Z64:[A-Za-z0-9+/=\s]+:[A-F0-9]{4}/gim, " ")
+    .replace(/~DGR:[\s\S]*?(?=\^XA|$)/gim, " ")
+    .replace(/\^[A-Z0-9@]{1,3}[^~^]*/gim, "\n")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function extractFdFields(text) {
+  const fields = [];
+  for (const match of String(text).matchAll(/\^FD([\s\S]*?)\^FS/gim)) {
+    const value = match[1].replace(/\^FH\\?/gi, "").replace(/\\[0-9A-F]{2}/gi, " ").trim();
+    if (value) fields.push(value);
+  }
+  return fields;
+}
+
+function normalizeProductCandidates(candidates) {
+  const cleaned = candidates
+    .flatMap((line) => String(line).split(/\r?\n+/))
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((line) => !/^\^|^~|Z64:|DEMO\.GRF/i.test(line));
+  const headerIndex = cleaned.findIndex((line) => /\b(SKU|ITENS?|QTD|QUANTIDADE|PRODUTOS?)\b/i.test(line));
+  const productLike = cleaned.filter((line) => isProductLine(line));
+  const selected = headerIndex >= 0 ? cleaned.slice(headerIndex, headerIndex + 30) : productLike;
+  const header = selected.find((line) => /\b(SKU|ITENS?)\b/i.test(line)) || "";
+  const lines = selected
+    .filter((line) => line !== header)
+    .filter((line) => isProductLine(line))
+    .map(parseProductLine);
+  const uniqueLines = dedupeProducts(lines);
+
+  return {
+    skuCount: extractHeaderNumber(header, /SKU\s*:?\s*(\d+)/i) || uniqueLines.length || null,
+    itemsCount:
+      extractHeaderNumber(header, /ITENS?\s*:?\s*(\d+)/i) ||
+      uniqueLines.reduce((sum, item) => sum + (item.quantity || 1), 0) ||
+      null,
+    lines: uniqueLines
+  };
+}
+
+function isProductLine(line) {
+  return /^(✓|✔|-|\*)\s*\S+/.test(line) || /^\d+\s*x\s+\S+/i.test(line);
+}
+
+function parseProductLine(line) {
+  const withoutMarker = line.replace(/^(✓|✔|-|\*)\s*/, "").trim();
+  const quantityMatch = withoutMarker.match(/^(\d+)\s*x\s+(.+)/i);
+
+  if (quantityMatch) {
+    return {
+      quantity: Number(quantityMatch[1]),
+      text: quantityMatch[2].trim()
+    };
+  }
+
+  return {
+    quantity: null,
+    text: withoutMarker
+  };
+}
+
+function dedupeProducts(lines) {
+  const seen = new Set();
+  return lines.filter((line) => {
+    const key = `${line.quantity || ""}:${line.text}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function extractHeaderNumber(header, pattern) {
+  const match = String(header).match(pattern);
+  return match ? Number(match[1]) : null;
+}
+
+function getTemplateSettings(body) {
+  const clientTemplate = parseTemplate(body?.templateJson);
+  const template = mergeTemplate(DEFAULT_TEMPLATE, clientTemplate);
+  const footer = template.footer;
+
+  footer.heightMm = clampNumber(Number(footer.heightMm), 12, 55);
+  footer.gapMm = clampNumber(Number(footer.gapMm), 0, 8);
+  footer.paddingMm = clampNumber(Number(footer.paddingMm), 1, 8);
+  footer.lineSpacing = clampNumber(Number(footer.lineSpacing), 0.9, 1.8);
+  footer.fontSize = PRODUCT_FONT_SIZES[footer.fontSize] ? footer.fontSize : "auto";
+  footer.marker = String(footer.marker || "✓").slice(0, 2);
+  footer.textColor = /^#[0-9a-f]{6}$/i.test(footer.textColor) ? footer.textColor : "#111827";
+
+  template.protectedArea = {
+    xMm: 0,
+    yMm: 0,
+    widthMm: 100,
+    heightMm: clampNumber(150 - footer.heightMm - footer.gapMm, 80, 150)
+  };
+
+  return template;
+}
+
+function parseTemplate(templateJson) {
+  if (!templateJson) return null;
+
+  try {
+    return JSON.parse(String(templateJson));
+  } catch {
+    return null;
+  }
+}
+
+function mergeTemplate(base, override) {
+  if (!override || typeof override !== "object") return structuredClone(base);
+
+  return {
+    ...base,
+    ...override,
+    protectedArea: {
+      ...base.protectedArea,
+      ...(override.protectedArea || {})
+    },
+    footer: {
+      ...base.footer,
+      ...(override.footer || {})
+    }
+  };
+}
+
+function hexToRgb(hex) {
+  const normalized = /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : "111827";
+  const value = Number.parseInt(normalized, 16);
+  return rgb(((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255);
+}
+
+function toPdfSafeText(text) {
+  return String(text)
+    .replace(/[✓✔]/g, "-")
+    .replace(/[•]/g, "-")
+    .replace(/[^\x20-\x7eÀ-ÿ]/g, "");
 }
 
 function clampNumber(value, min, max) {

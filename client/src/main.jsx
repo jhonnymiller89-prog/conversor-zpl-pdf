@@ -48,6 +48,29 @@ const DEFAULT_SETTINGS = {
   marginMm: 0,
   scaleMode: "fit"
 };
+const DEFAULT_TEMPLATE = {
+  id: "jm-cosmeticos",
+  name: "JM Cosméticos",
+  footer: {
+    enabled: true,
+    heightMm: 30,
+    paddingMm: 3,
+    showSku: true,
+    showTotalItems: true,
+    showQuantity: true,
+    showMarker: true,
+    marker: "✓",
+    fontSize: "auto",
+    lineSpacing: 1.08,
+    textColor: "#111827"
+  }
+};
+const FONT_SIZE_OPTIONS = [
+  { value: "auto", label: "Automático" },
+  { value: "small", label: "Pequeno" },
+  { value: "medium", label: "Médio" },
+  { value: "large", label: "Grande" }
+];
 
 function App() {
   const inputRef = useRef(null);
@@ -55,6 +78,7 @@ function App() {
   const [rawZpl, setRawZpl] = useState("");
   const [mode, setMode] = useState("upload");
   const [settings, setSettings] = useState(loadStored("zpl-settings", DEFAULT_SETTINGS));
+  const [template, setTemplate] = useState(loadStored("zpl-template", DEFAULT_TEMPLATE));
   const [profile, setProfile] = useState(loadStored("zpl-profile", { name: "" }));
   const [history, setHistory] = useState(loadStored("zpl-history", []));
   const [isDragging, setIsDragging] = useState(false);
@@ -73,6 +97,10 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
+    localStorage.setItem("zpl-template", JSON.stringify(template));
+  }, [template]);
+
+  useEffect(() => {
     localStorage.setItem("zpl-profile", JSON.stringify(profile));
   }, [profile]);
 
@@ -82,6 +110,23 @@ function App() {
 
   function updateSetting(key, value) {
     setSettings((current) => ({ ...current, [key]: value }));
+    clearOutput();
+  }
+
+  function updateTemplate(path, value) {
+    setTemplate((current) => {
+      if (path.startsWith("footer.")) {
+        return {
+          ...current,
+          footer: {
+            ...current.footer,
+            [path.replace("footer.", "")]: value
+          }
+        };
+      }
+
+      return { ...current, [path]: value };
+    });
     clearOutput();
   }
 
@@ -216,6 +261,7 @@ function App() {
     formData.append("rotation", settings.rotation);
     formData.append("marginMm", settings.marginMm);
     formData.append("scaleMode", settings.scaleMode);
+    formData.append("templateJson", JSON.stringify(template));
     Object.entries(extraFields).forEach(([key, value]) => formData.append(key, value));
     return formData;
   }
@@ -316,7 +362,12 @@ function App() {
             />
           )}
 
-          <SettingsPanel settings={settings} updateSetting={updateSetting} />
+          <SettingsPanel
+            settings={settings}
+            template={template}
+            updateSetting={updateSetting}
+            updateTemplate={updateTemplate}
+          />
 
           {error && <p className="message error">{error}</p>}
 
@@ -435,7 +486,7 @@ function UploadArea({ inputRef, files, isDragging, setIsDragging, selectFiles, r
   );
 }
 
-function SettingsPanel({ settings, updateSetting }) {
+function SettingsPanel({ settings, template, updateSetting, updateTemplate }) {
   return (
     <section className="options-panel" aria-label="Opções de conversão">
       <div className="section-title">
@@ -505,6 +556,94 @@ function SettingsPanel({ settings, updateSetting }) {
           </button>
         ))}
       </div>
+
+      <div className="template-panel">
+        <div className="section-title">
+          <SlidersHorizontal size={19} aria-hidden="true" />
+          <strong>Template operacional</strong>
+          <span>{template.name}</span>
+        </div>
+
+        <div className="toggle-grid">
+          <label>
+            <input
+              type="checkbox"
+              checked={template.footer.enabled}
+              onChange={(event) => updateTemplate("footer.enabled", event.target.checked)}
+            />
+            Rodapé automático
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={template.footer.showSku}
+              onChange={(event) => updateTemplate("footer.showSku", event.target.checked)}
+            />
+            Mostrar SKU
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={template.footer.showTotalItems}
+              onChange={(event) => updateTemplate("footer.showTotalItems", event.target.checked)}
+            />
+            Total de itens
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={template.footer.showQuantity}
+              onChange={(event) => updateTemplate("footer.showQuantity", event.target.checked)}
+            />
+            Quantidade
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={template.footer.showMarker}
+              onChange={(event) => updateTemplate("footer.showMarker", event.target.checked)}
+            />
+            Marcador
+          </label>
+        </div>
+
+        <div className="settings-grid">
+          <label>
+            Fonte
+            <select
+              value={template.footer.fontSize}
+              onChange={(event) => updateTemplate("footer.fontSize", event.target.value)}
+            >
+              {FONT_SIZE_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Altura do rodapé: {template.footer.heightMm} mm
+            <input
+              type="range"
+              min="12"
+              max="55"
+              value={template.footer.heightMm}
+              onChange={(event) => updateTemplate("footer.heightMm", Number(event.target.value))}
+            />
+          </label>
+          <label>
+            Espaçamento: {template.footer.lineSpacing}
+            <input
+              type="range"
+              min="0.9"
+              max="1.8"
+              step="0.02"
+              value={template.footer.lineSpacing}
+              onChange={(event) => updateTemplate("footer.lineSpacing", Number(event.target.value))}
+            />
+          </label>
+        </div>
+      </div>
     </section>
   );
 }
@@ -555,7 +694,7 @@ function PreviewPanel({ previews, total, limit, onSelect }) {
             onClick={() => onSelect({ ...preview, globalIndex: preview.globalIndex ?? index })}
             type="button"
           >
-            <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
+            <PreviewImage preview={preview} index={index} />
             <span>
               {preview.sourceName} #{preview.index}
             </span>
@@ -563,6 +702,31 @@ function PreviewPanel({ previews, total, limit, onSelect }) {
         ))}
       </div>
     </section>
+  );
+}
+
+function PreviewImage({ preview, index }) {
+  if (!preview.productFooter?.lines?.length) {
+    return <img src={preview.image} alt={`Etiqueta ${index + 1}`} />;
+  }
+
+  return (
+    <div className="preview-composed">
+      <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
+      <div className="preview-footer">
+        <strong>
+          {preview.productFooter.skuCount ? `SKU: ${preview.productFooter.skuCount}` : ""}
+          {preview.productFooter.skuCount && preview.productFooter.itemsCount ? " • " : ""}
+          {preview.productFooter.itemsCount ? `ITENS: ${preview.productFooter.itemsCount}` : ""}
+        </strong>
+        {preview.productFooter.lines.slice(0, 4).map((item, itemIndex) => (
+          <small key={`${item.text}-${itemIndex}`}>
+            ✓ {item.quantity ? `${item.quantity}x ` : ""}
+            {item.text}
+          </small>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -581,7 +745,7 @@ function PreviewModal({ preview, isGenerating, onClose, onDownload }) {
         </div>
 
         <div className="modal-image-frame">
-          <img src={preview.image} alt={`Etiqueta ${preview.index} ampliada`} />
+          <PreviewImage preview={preview} index={preview.index - 1} />
         </div>
 
         <div className="modal-actions">
