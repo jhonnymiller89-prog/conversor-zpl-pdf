@@ -7,12 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   PDFDocument,
   StandardFonts,
-  clip,
   degrees,
-  endPath,
-  popGraphicsState,
-  pushGraphicsState,
-  rectangle,
   rgb
 } from "pdf-lib";
 
@@ -507,15 +502,13 @@ function drawImageFooter(page, image, settings, label) {
   const targetHeight = Math.max(footerHeight - padding * 2, 1);
   const rotatedWidth = image.height;
   const rotatedHeight = image.width;
-  const visibleBandRatio = 0.22;
-  const scale = Math.max(targetWidth / rotatedWidth, targetHeight / (rotatedHeight * visibleBandRatio));
+  const scale = Math.min(targetWidth / rotatedWidth, targetHeight / rotatedHeight);
   const drawWidth = image.width * scale;
   const drawHeight = image.height * scale;
   const boxWidth = rotatedWidth * scale;
   const boxHeight = rotatedHeight * scale;
   const left = padding + (targetWidth - boxWidth) / 2;
-  const cropOffset = boxHeight * 0.5;
-  const bottom = padding + (targetHeight - boxHeight) / 2 - cropOffset;
+  const bottom = padding + (targetHeight - boxHeight) / 2;
 
   page.drawRectangle({
     x: 0,
@@ -527,28 +520,17 @@ function drawImageFooter(page, image, settings, label) {
     borderWidth: 0.6
   });
 
-  page.pushOperators(
-    pushGraphicsState(),
-    rectangle(padding, padding, targetWidth, targetHeight),
-    clip(),
-    endPath()
-  );
-
-  try {
-    page.drawImage(image, {
-      x: left + boxWidth,
-      y: bottom,
-      width: drawWidth,
-      height: drawHeight,
-      rotate: degrees(90)
-    });
-  } finally {
-    page.pushOperators(popGraphicsState());
-  }
+  page.drawImage(image, {
+    x: left + boxWidth,
+    y: bottom,
+    width: drawWidth,
+    height: drawHeight,
+    rotate: degrees(90)
+  });
 }
 
 function getFooterHeightMm(label, settings) {
-  if (label.productFooterZpl) return 18;
+  if (label.productFooterZpl) return 26;
   return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
