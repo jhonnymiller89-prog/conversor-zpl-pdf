@@ -100,14 +100,16 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
       const pngBytes = await renderZplToPng(label.zpl, settings);
       const footerPngBytes = label.productFooterZpl ? await renderZplToPng(label.productFooterZpl, settings) : null;
       const imageProductFooter = footerPngBytes ? await extractProductsFromChecklistImage(footerPngBytes) : null;
+      const previewFooterPngBytes =
+        footerPngBytes && !imageProductFooter?.lines?.length ? await prepareChecklistFooterImage(footerPngBytes) : null;
 
       previews.push({
         globalIndex,
         sourceName: label.sourceName,
         index: label.index,
         productFooter: imageProductFooter || label.productFooter,
-        productFooterImage: footerPngBytes
-          ? `data:image/png;base64,${Buffer.from(footerPngBytes).toString("base64")}`
+        productFooterImage: previewFooterPngBytes
+          ? `data:image/png;base64,${Buffer.from(previewFooterPngBytes).toString("base64")}`
           : null,
         image: `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`
       });
@@ -419,8 +421,9 @@ async function drawLabelPage(pdf, page, image, settings, label) {
       return;
     }
 
-    const footerImage = await pdf.embedPng(footerPngBytes);
-    drawImageFooter(page, footerImage, settings, label);
+    const preparedFooterPngBytes = await prepareChecklistFooterImage(footerPngBytes);
+    const preparedFooterImage = await pdf.embedPng(preparedFooterPngBytes);
+    drawImageFooter(page, preparedFooterImage, settings, label);
     return;
   }
 
@@ -514,15 +517,11 @@ function drawImageFooter(page, image, settings, label) {
   const padding = footer.paddingMm * MM_TO_POINTS;
   const targetWidth = Math.max(settings.pdfWidth - padding * 2, 1);
   const targetHeight = Math.max(footerHeight - padding * 2, 1);
-  const rotatedWidth = image.height;
-  const rotatedHeight = image.width;
-  const scale = Math.max(targetWidth / rotatedWidth, targetHeight / (rotatedHeight * 0.28));
+  const scale = Math.min(targetWidth / image.width, targetHeight / image.height);
   const drawWidth = image.width * scale;
   const drawHeight = image.height * scale;
-  const boxWidth = rotatedWidth * scale;
-  const boxHeight = rotatedHeight * scale;
-  const left = padding + (targetWidth - boxWidth) / 2;
-  const bottom = padding + (targetHeight - boxHeight) / 2 + boxHeight * 0.26;
+  const left = padding + (targetWidth - drawWidth) / 2;
+  const bottom = padding + (targetHeight - drawHeight) / 2;
 
   page.drawRectangle({
     x: 0,
@@ -544,10 +543,9 @@ function drawImageFooter(page, image, settings, label) {
   try {
     page.drawImage(image, {
       x: left,
-      y: bottom + boxHeight,
+      y: bottom,
       width: drawWidth,
-      height: drawHeight,
-      rotate: degrees(270)
+      height: drawHeight
     });
   } finally {
     page.pushOperators(popGraphicsState());
@@ -801,6 +799,62 @@ async function buildOcrImageVariants(pngBytes) {
   }
 
   return dedupeBuffers(variants).slice(0, 6);
+}
+
+async function prepareChecklistFooterImage(pngBytes) {
+  try {
+    const { default: sharp } = await import("sharp");
+    const source = Buffer.from(pngBytes);
+    const candidates = [];
+
+    for (const rotation of [0, 90, 270, 180]) {
+      const trimmed = await sharp(source)
+        .rotate(rotation)
+        .flatten({ background: "#ffffff" })
+        .trim({ background: "#ffffff", threshold: 22 })
+        .png()
+        .toBuffer();
+      candidates.push(trimmed);
+
+      const metadata = await sharp(trimmed).metadata();
+      if (metadata.width && metadata.height && metadata.height > 40) {
+        const cropTop = Math.floor(metadata.height * 0.45);
+        const cropHeight = metadata.height - cropTop;
+        candidates.push(
+          await sharp(trimmed)
+            .extract({ left: 0, top: cropTop, width: metadata.width, height: cropHeight })
+            .trim({ background: "#ffffff", threshold: 22 })
+            .png()
+            .toBuffer()
+        );
+      }
+    }
+
+    const ranked = [];
+    for (const candidate of dedupeBuffers(candidates)) {
+      const metadata = await sharp(candidate).metadata();
+      if (!metadata.width || !metadata.height) continue;
+      ranked.push({
+        buffer: candidate,
+        score: scoreFooterImageCandidate(metadata.width, metadata.height)
+      });
+    }
+
+    ranked.sort((a, b) => b.score - a.score);
+    return ranked[0]?.buffer || Buffer.from(pngBytes);
+  } catch (error) {
+    console.warn("Recorte do checklist indisponível:", error?.message || error);
+    return Buffer.from(pngBytes);
+  }
+}
+
+function scoreFooterImageCandidate(width, height) {
+  const ratio = width / Math.max(height, 1);
+  const area = width * height;
+  const wideBonus = ratio >= 1.8 ? 200000 : 0;
+  const veryTallPenalty = ratio < 0.8 ? 300000 : 0;
+
+  return area + wideBonus - veryTallPenalty;
 }
 
 function scoreOcrText(text) {
