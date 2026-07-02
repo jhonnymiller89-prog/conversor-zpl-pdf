@@ -359,13 +359,15 @@ async function renderZplToPng(zpl, settings) {
   for (let attempt = 1; attempt <= LABELARY_MAX_ATTEMPTS; attempt += 1) {
     await waitForLabelarySlot();
 
+    const formData = new FormData();
+    formData.append("file", new Blob([zpl], { type: "text/plain" }), "label.zpl");
+
     const response = await fetch(settings.labelaryUrl, {
       method: "POST",
       headers: {
-        Accept: "image/png",
-        "Content-Type": "application/x-www-form-urlencoded"
+        Accept: "image/png"
       },
-      body: zpl
+      body: formData
     });
 
     if (response.ok) {
