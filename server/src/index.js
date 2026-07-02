@@ -513,7 +513,7 @@ function drawImageFooter(page, image, settings, label) {
   const boxWidth = rotatedWidth * scale;
   const boxHeight = rotatedHeight * scale;
   const left = padding + (targetWidth - boxWidth) / 2;
-  const bottom = padding + (targetHeight - boxHeight) / 2 - boxHeight * 0.34;
+  const bottom = padding + (targetHeight - boxHeight) / 2 + boxHeight * 0.26;
 
   page.drawRectangle({
     x: 0,

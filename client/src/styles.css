@@ -522,7 +522,7 @@ input[type="range"] {
   object-fit: contain;
   border: 0;
   background: #ffffff;
-  transform: rotate(270deg) translateY(-12%);
+  transform: rotate(270deg) translateY(18%);
   transform-origin: center;
 }
 
