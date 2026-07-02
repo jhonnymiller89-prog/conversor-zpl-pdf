@@ -21,7 +21,9 @@ const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || "127.0.0.1";
 const CM_TO_POINTS = 28.3464567;
 const MM_TO_POINTS = 2.83464567;
-const MAX_PREVIEW_LABELS = 12;
+const MAX_PREVIEW_LABELS = 6;
+const LABELARY_MIN_INTERVAL_MS = 450;
+const LABELARY_MAX_ATTEMPTS = 4;
 const LABEL_PRESETS = {
   "10x15": { label: "10 x 15 cm", widthCm: 10, heightCm: 15, labelarySize: "3.94x5.91" },
   "10x10": { label: "10 x 10 cm", widthCm: 10, heightCm: 10, labelarySize: "3.94x3.94" },
@@ -31,6 +33,7 @@ const LABEL_PRESETS = {
 const ALLOWED_DENSITIES = new Set(["6", "8", "12", "24"]);
 const ALLOWED_ROTATIONS = new Set(["0", "90", "180", "270"]);
 const ALLOWED_SCALE_MODES = new Set(["fit", "fill", "original"]);
+let lastLabelaryRequestAt = 0;
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
 app.use(express.json({ limit: "2mb" }));
@@ -351,25 +354,56 @@ function clampNumber(value, min, max) {
 }
 
 async function renderZplToPng(zpl, settings) {
-  const response = await fetch(settings.labelaryUrl, {
-    method: "POST",
-    headers: {
-      Accept: "image/png",
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: zpl
-  });
+  let lastErrorDetails = "";
 
-  if (!response.ok) {
-    const details = await response.text().catch(() => "");
-    const error = new Error(details || "Falha ao renderizar etiqueta ZPL.");
-    error.statusCode = 422;
-    error.publicMessage =
-      "O renderizador não conseguiu interpretar uma das etiquetas. Verifique o ZPL e tente novamente.";
-    throw error;
+  for (let attempt = 1; attempt <= LABELARY_MAX_ATTEMPTS; attempt += 1) {
+    await waitForLabelarySlot();
+
+    const response = await fetch(settings.labelaryUrl, {
+      method: "POST",
+      headers: {
+        Accept: "image/png",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: zpl
+    });
+
+    if (response.ok) {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+
+    lastErrorDetails = await response.text().catch(() => "");
+
+    if (response.status === 429 || response.status >= 500) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const retryDelay = Number.isFinite(retryAfter)
+        ? retryAfter * 1000
+        : LABELARY_MIN_INTERVAL_MS * (attempt + 1);
+      await delay(retryDelay);
+      continue;
+    }
+
+    break;
   }
 
-  return new Uint8Array(await response.arrayBuffer());
+  const error = new Error(lastErrorDetails || "Falha ao renderizar etiqueta ZPL.");
+  error.statusCode = 422;
+  error.publicMessage =
+    "O renderizador não conseguiu interpretar uma das etiquetas. Verifique o ZPL e tente novamente.";
+  throw error;
+}
+
+async function waitForLabelarySlot() {
+  const now = Date.now();
+  const waitMs = Math.max(0, lastLabelaryRequestAt + LABELARY_MIN_INTERVAL_MS - now);
+  if (waitMs > 0) {
+    await delay(waitMs);
+  }
+  lastLabelaryRequestAt = Date.now();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sendError(res, error) {
