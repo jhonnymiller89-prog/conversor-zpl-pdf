@@ -423,7 +423,7 @@ function getProtectedAreaForLabel(label, settings) {
 
   return {
     ...settings.template.protectedArea,
-    heightMm: clampNumber(150 - getFooterHeightMm(label, settings), 80, 150)
+    heightMm: clampNumber(150 - getFooterHeightMm(label, settings), 120, 150)
   };
 }
 
@@ -504,14 +504,14 @@ function drawImageFooter(page, image, settings, label) {
   const targetHeight = Math.max(footerHeight - padding * 2, 1);
   const rotatedWidth = image.height;
   const rotatedHeight = image.width;
-  const visibleBandRatio = 0.42;
+  const visibleBandRatio = 0.22;
   const scale = Math.max(targetWidth / rotatedWidth, targetHeight / (rotatedHeight * visibleBandRatio));
   const drawWidth = image.width * scale;
   const drawHeight = image.height * scale;
   const boxWidth = rotatedWidth * scale;
   const boxHeight = rotatedHeight * scale;
   const left = padding + (targetWidth - boxWidth) / 2;
-  const cropOffset = boxHeight * 0.34;
+  const cropOffset = boxHeight * 0.5;
   const bottom = padding + (targetHeight - boxHeight) / 2 - cropOffset;
 
   page.drawRectangle({
@@ -545,7 +545,7 @@ function drawImageFooter(page, image, settings, label) {
 }
 
 function getFooterHeightMm(label, settings) {
-  if (label.productFooterZpl) return Math.max(Number(settings.template.footer.heightMm) || 0, 32);
+  if (label.productFooterZpl) return 22;
   return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
