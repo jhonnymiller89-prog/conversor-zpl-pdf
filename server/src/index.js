@@ -87,11 +87,16 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
     for (let globalIndex = 0; globalIndex < labelsToPreview.length; globalIndex += 1) {
       const label = labelsToPreview[globalIndex];
       const pngBytes = await renderZplToPng(label.zpl, settings);
+      const footerPngBytes = label.productFooterZpl ? await renderZplToPng(label.productFooterZpl, settings) : null;
+
       previews.push({
         globalIndex,
         sourceName: label.sourceName,
         index: label.index,
         productFooter: label.productFooter,
+        productFooterImage: footerPngBytes
+          ? `data:image/png;base64,${Buffer.from(footerPngBytes).toString("base64")}`
+          : null,
         image: `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`
       });
     }
@@ -185,14 +190,7 @@ function buildLabelPayload(req) {
     throw error;
   }
 
-  const labels = sources.flatMap((source) =>
-    extractPrintableLabels(source.content).map((entry, index) => ({
-      zpl: entry.zpl,
-      productFooter: entry.productFooter,
-      sourceName: source.name,
-      index: index + 1
-    }))
-  );
+  const labels = sources.flatMap((source) => normalizeSourceLabels(source));
 
   if (labels.length === 0) {
     const error = new Error("Nenhuma etiqueta ZPL válida foi encontrada.");
@@ -298,6 +296,44 @@ function extractPrintableLabels(content) {
   return labels;
 }
 
+function normalizeSourceLabels(source) {
+  const entries = extractPrintableLabels(source.content);
+  const shouldMergeImageChecklist = shouldMergePairedChecklist(source, entries);
+  const labels = [];
+
+  if (shouldMergeImageChecklist) {
+    for (let index = 0; index < entries.length; index += 2) {
+      const labelEntry = entries[index];
+      const checklistEntry = entries[index + 1];
+
+      labels.push({
+        zpl: labelEntry.zpl,
+        productFooter: labelEntry.productFooter,
+        productFooterZpl: checklistEntry?.zpl || null,
+        sourceName: source.name,
+        index: labels.length + 1
+      });
+    }
+
+    return labels;
+  }
+
+  return entries.map((entry, index) => ({
+    zpl: entry.zpl,
+    productFooter: entry.productFooter,
+    productFooterZpl: null,
+    sourceName: source.name,
+    index: index + 1
+  }));
+}
+
+function shouldMergePairedChecklist(source, entries) {
+  if (entries.length < 2 || entries.length % 2 !== 0) return false;
+  if (entries.some((entry) => entry.productFooter?.lines?.length)) return false;
+
+  return /(lista|checklist|produto|pedido|separacao|separação)/i.test(source.name);
+}
+
 function countLabelBlocks(content) {
   return (content.match(/\^XA[\s\S]*?\^XZ/gim) || []).length;
 }
@@ -351,7 +387,9 @@ function getConversionSettings(body) {
 }
 
 async function drawLabelPage(pdf, page, image, settings, label) {
-  const hasProductFooter = Boolean(label.productFooter?.lines?.length && settings.template.footer.enabled);
+  const hasProductFooter = Boolean(
+    settings.template.footer.enabled && (label.productFooter?.lines?.length || label.productFooterZpl)
+  );
 
   if (!hasProductFooter) {
     drawLabelImage(page, image, settings, null);
@@ -359,6 +397,14 @@ async function drawLabelPage(pdf, page, image, settings, label) {
   }
 
   drawLabelImage(page, image, settings, settings.template.protectedArea);
+
+  if (label.productFooterZpl) {
+    const footerPngBytes = await renderZplToPng(label.productFooterZpl, settings);
+    const footerImage = await pdf.embedPng(footerPngBytes);
+    drawImageFooter(page, footerImage, settings);
+    return;
+  }
+
   await drawProductFooter(pdf, page, label.productFooter, settings);
 }
 
@@ -426,6 +472,34 @@ function drawLabelImage(page, image, settings, area) {
   page.drawImage(image, {
     x: left,
     y: bottom,
+    width: drawWidth,
+    height: drawHeight
+  });
+}
+
+function drawImageFooter(page, image, settings) {
+  const footer = settings.template.footer;
+  const footerHeight = footer.heightMm * MM_TO_POINTS;
+  const padding = footer.paddingMm * MM_TO_POINTS;
+  const targetWidth = Math.max(settings.pdfWidth - padding * 2, 1);
+  const targetHeight = Math.max(footerHeight - padding * 2, 1);
+  const scale = Math.min(targetWidth / image.width, targetHeight / image.height);
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+
+  page.drawRectangle({
+    x: 0,
+    y: 0,
+    width: settings.pdfWidth,
+    height: footerHeight,
+    color: rgb(1, 1, 1),
+    borderColor: rgb(0.78, 0.82, 0.88),
+    borderWidth: 0.6
+  });
+
+  page.drawImage(image, {
+    x: padding + (targetWidth - drawWidth) / 2,
+    y: padding + (targetHeight - drawHeight) / 2,
     width: drawWidth,
     height: drawHeight
   });

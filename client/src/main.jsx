@@ -706,26 +706,32 @@ function PreviewPanel({ previews, total, limit, onSelect }) {
 }
 
 function PreviewImage({ preview, index }) {
-  if (!preview.productFooter?.lines?.length) {
+  if (!preview.productFooter?.lines?.length && !preview.productFooterImage) {
     return <img src={preview.image} alt={`Etiqueta ${index + 1}`} />;
   }
 
   return (
     <div className="preview-composed">
       <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
-      <div className="preview-footer">
-        <strong>
-          {preview.productFooter.skuCount ? `SKU: ${preview.productFooter.skuCount}` : ""}
-          {preview.productFooter.skuCount && preview.productFooter.itemsCount ? " • " : ""}
-          {preview.productFooter.itemsCount ? `ITENS: ${preview.productFooter.itemsCount}` : ""}
-        </strong>
-        {preview.productFooter.lines.slice(0, 4).map((item, itemIndex) => (
-          <small key={`${item.text}-${itemIndex}`}>
-            ✓ {item.quantity ? `${item.quantity}x ` : ""}
-            {item.text}
-          </small>
-        ))}
-      </div>
+      {preview.productFooterImage ? (
+        <div className="preview-footer preview-footer-image">
+          <img src={preview.productFooterImage} alt={`Lista da etiqueta ${index + 1}`} />
+        </div>
+      ) : (
+        <div className="preview-footer">
+          <strong>
+            {preview.productFooter.skuCount ? `SKU: ${preview.productFooter.skuCount}` : ""}
+            {preview.productFooter.skuCount && preview.productFooter.itemsCount ? " • " : ""}
+            {preview.productFooter.itemsCount ? `ITENS: ${preview.productFooter.itemsCount}` : ""}
+          </strong>
+          {preview.productFooter.lines.slice(0, 4).map((item, itemIndex) => (
+            <small key={`${item.text}-${itemIndex}`}>
+              ✓ {item.quantity ? `${item.quantity}x ` : ""}
+              {item.text}
+            </small>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
