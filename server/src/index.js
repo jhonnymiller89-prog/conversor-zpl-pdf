@@ -215,17 +215,21 @@ function extractSources(file) {
 
 function extractPrintableLabels(content) {
   const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const firstLabelIndex = normalized.search(/\^XA/i);
-  const resourcePrefix = firstLabelIndex > 0 ? normalized.slice(0, firstLabelIndex).trim() : "";
-  const matches = normalized.match(/\^XA[\s\S]*?\^XZ/gim) || [];
+  const matches = [...normalized.matchAll(/\^XA[\s\S]*?\^XZ/gim)];
+  const labels = [];
+  let previousEnd = 0;
 
-  return matches
-    .map((label) => label.trim())
-    .filter(isPrintableLabel)
-    .map((label) => {
-      if (!resourcePrefix) return label;
-      return `${resourcePrefix}\n${label}`;
-    });
+  for (const match of matches) {
+    const label = match[0].trim();
+    const localPrefix = normalized.slice(previousEnd, match.index).trim();
+    previousEnd = match.index + match[0].length;
+
+    if (!isPrintableLabel(label)) continue;
+
+    labels.push(localPrefix ? `${localPrefix}\n${label}` : label);
+  }
+
+  return labels;
 }
 
 function countLabelBlocks(content) {
