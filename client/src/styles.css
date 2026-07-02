@@ -481,7 +481,7 @@ input[type="range"] {
 
 .preview-composed {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 28%;
+  grid-template-rows: minmax(0, 1fr) 23%;
   width: 100%;
   aspect-ratio: 2 / 3;
   overflow: hidden;
@@ -511,14 +511,17 @@ input[type="range"] {
   display: grid;
   place-items: center;
   padding: 4px;
+  overflow: hidden;
 }
 
 .preview-footer-image img {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: 245%;
   object-fit: contain;
   border: 0;
   background: #ffffff;
+  transform: rotate(90deg) translateY(-8%);
+  transform-origin: center;
 }
 
 .preview-footer strong,
@@ -614,8 +617,16 @@ input[type="range"] {
   max-height: 68vh;
 }
 
+.modal-image-frame .preview-composed {
+  grid-template-rows: minmax(0, 1fr) 24%;
+}
+
 .modal-image-frame .preview-footer {
   padding: 10px 12px;
+}
+
+.modal-image-frame .preview-footer-image img {
+  height: 270%;
 }
 
 .modal-image-frame .preview-footer strong {

@@ -4,7 +4,17 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
+import {
+  PDFDocument,
+  StandardFonts,
+  clip,
+  degrees,
+  endPath,
+  popGraphicsState,
+  pushGraphicsState,
+  rectangle,
+  rgb
+} from "pdf-lib";
 
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -396,16 +406,25 @@ async function drawLabelPage(pdf, page, image, settings, label) {
     return;
   }
 
-  drawLabelImage(page, image, settings, settings.template.protectedArea);
+  drawLabelImage(page, image, settings, getProtectedAreaForLabel(label, settings));
 
   if (label.productFooterZpl) {
     const footerPngBytes = await renderZplToPng(label.productFooterZpl, settings);
     const footerImage = await pdf.embedPng(footerPngBytes);
-    drawImageFooter(page, footerImage, settings);
+    drawImageFooter(page, footerImage, settings, label);
     return;
   }
 
   await drawProductFooter(pdf, page, label.productFooter, settings);
+}
+
+function getProtectedAreaForLabel(label, settings) {
+  if (!label.productFooterZpl) return settings.template.protectedArea;
+
+  return {
+    ...settings.template.protectedArea,
+    heightMm: clampNumber(150 - getFooterHeightMm(label, settings), 80, 150)
+  };
 }
 
 function drawLabelImage(page, image, settings, area) {
@@ -477,15 +496,23 @@ function drawLabelImage(page, image, settings, area) {
   });
 }
 
-function drawImageFooter(page, image, settings) {
+function drawImageFooter(page, image, settings, label) {
   const footer = settings.template.footer;
-  const footerHeight = footer.heightMm * MM_TO_POINTS;
+  const footerHeight = getFooterHeightMm(label, settings) * MM_TO_POINTS;
   const padding = footer.paddingMm * MM_TO_POINTS;
   const targetWidth = Math.max(settings.pdfWidth - padding * 2, 1);
   const targetHeight = Math.max(footerHeight - padding * 2, 1);
-  const scale = Math.min(targetWidth / image.width, targetHeight / image.height);
+  const rotatedWidth = image.height;
+  const rotatedHeight = image.width;
+  const visibleBandRatio = 0.42;
+  const scale = Math.max(targetWidth / rotatedWidth, targetHeight / (rotatedHeight * visibleBandRatio));
   const drawWidth = image.width * scale;
   const drawHeight = image.height * scale;
+  const boxWidth = rotatedWidth * scale;
+  const boxHeight = rotatedHeight * scale;
+  const left = padding + (targetWidth - boxWidth) / 2;
+  const cropOffset = boxHeight * 0.34;
+  const bottom = padding + (targetHeight - boxHeight) / 2 - cropOffset;
 
   page.drawRectangle({
     x: 0,
@@ -497,12 +524,29 @@ function drawImageFooter(page, image, settings) {
     borderWidth: 0.6
   });
 
-  page.drawImage(image, {
-    x: padding + (targetWidth - drawWidth) / 2,
-    y: padding + (targetHeight - drawHeight) / 2,
-    width: drawWidth,
-    height: drawHeight
-  });
+  page.pushOperators(
+    pushGraphicsState(),
+    rectangle(padding, padding, targetWidth, targetHeight),
+    clip(),
+    endPath()
+  );
+
+  try {
+    page.drawImage(image, {
+      x: left + boxWidth,
+      y: bottom,
+      width: drawWidth,
+      height: drawHeight,
+      rotate: degrees(90)
+    });
+  } finally {
+    page.pushOperators(popGraphicsState());
+  }
+}
+
+function getFooterHeightMm(label, settings) {
+  if (label.productFooterZpl) return Math.max(Number(settings.template.footer.heightMm) || 0, 32);
+  return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
 async function drawProductFooter(pdf, page, productFooter, settings) {
