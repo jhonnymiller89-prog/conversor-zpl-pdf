@@ -808,25 +808,28 @@ async function prepareChecklistFooterImage(pngBytes) {
     const candidates = [];
 
     for (const rotation of [0, 90, 270, 180]) {
-      const trimmed = await sharp(source)
+      const rotated = await sharp(source)
         .rotate(rotation)
         .flatten({ background: "#ffffff" })
-        .trim({ background: "#ffffff", threshold: 22 })
         .png()
         .toBuffer();
-      candidates.push(trimmed);
+      const trimmed = await cropImageToInk(rotated);
+      if (trimmed) candidates.push(trimmed);
 
-      const metadata = await sharp(trimmed).metadata();
+      const metadata = await sharp(rotated).metadata();
       if (metadata.width && metadata.height && metadata.height > 40) {
-        const cropTop = Math.floor(metadata.height * 0.45);
-        const cropHeight = metadata.height - cropTop;
-        candidates.push(
-          await sharp(trimmed)
+        for (const start of [0.28, 0.4, 0.52, 0.64]) {
+          const cropTop = Math.floor(metadata.height * start);
+          const cropHeight = metadata.height - cropTop;
+          if (cropHeight <= 20) continue;
+
+          const partial = await sharp(rotated)
             .extract({ left: 0, top: cropTop, width: metadata.width, height: cropHeight })
-            .trim({ background: "#ffffff", threshold: 22 })
             .png()
-            .toBuffer()
-        );
+            .toBuffer();
+          const partialTrimmed = await cropImageToInk(partial);
+          if (partialTrimmed) candidates.push(partialTrimmed);
+        }
       }
     }
 
@@ -834,9 +837,11 @@ async function prepareChecklistFooterImage(pngBytes) {
     for (const candidate of dedupeBuffers(candidates)) {
       const metadata = await sharp(candidate).metadata();
       if (!metadata.width || !metadata.height) continue;
+      const ink = await getInkStats(candidate);
+      if (ink.darkPixels < 80) continue;
       ranked.push({
         buffer: candidate,
-        score: scoreFooterImageCandidate(metadata.width, metadata.height)
+        score: scoreFooterImageCandidate(metadata.width, metadata.height, ink.darkPixels)
       });
     }
 
@@ -848,13 +853,77 @@ async function prepareChecklistFooterImage(pngBytes) {
   }
 }
 
-function scoreFooterImageCandidate(width, height) {
+async function cropImageToInk(imageBytes) {
+  const { default: sharp } = await import("sharp");
+  const { data, info } = await sharp(imageBytes)
+    .flatten({ background: "#ffffff" })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const bounds = getInkBounds(data, info.width, info.height);
+
+  if (!bounds || bounds.darkPixels < 80) return null;
+
+  const padding = 8;
+  const left = Math.max(bounds.minX - padding, 0);
+  const top = Math.max(bounds.minY - padding, 0);
+  const right = Math.min(bounds.maxX + padding, info.width - 1);
+  const bottom = Math.min(bounds.maxY + padding, info.height - 1);
+
+  return sharp(imageBytes)
+    .extract({
+      left,
+      top,
+      width: Math.max(right - left + 1, 1),
+      height: Math.max(bottom - top + 1, 1)
+    })
+    .flatten({ background: "#ffffff" })
+    .png()
+    .toBuffer();
+}
+
+async function getInkStats(imageBytes) {
+  const { default: sharp } = await import("sharp");
+  const { data, info } = await sharp(imageBytes)
+    .flatten({ background: "#ffffff" })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return getInkBounds(data, info.width, info.height) || { darkPixels: 0 };
+}
+
+function getInkBounds(data, width, height) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  let darkPixels = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const value = data[y * width + x];
+      if (value > 210) continue;
+
+      darkPixels += 1;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (!darkPixels) return null;
+  return { minX, minY, maxX, maxY, darkPixels };
+}
+
+function scoreFooterImageCandidate(width, height, darkPixels) {
   const ratio = width / Math.max(height, 1);
   const area = width * height;
-  const wideBonus = ratio >= 1.8 ? 200000 : 0;
-  const veryTallPenalty = ratio < 0.8 ? 300000 : 0;
+  const wideBonus = ratio >= 1.8 ? 800000 : 0;
+  const tableRatioBonus = ratio >= 2.5 && ratio <= 9 ? 500000 : 0;
+  const veryTallPenalty = ratio < 1.2 ? 900000 : 0;
 
-  return area + wideBonus - veryTallPenalty;
+  return darkPixels * 10 + area + wideBonus + tableRatioBonus - veryTallPenalty;
 }
 
 function scoreOcrText(text) {
