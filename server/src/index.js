@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || "127.0.0.1";
 const CM_TO_POINTS = 28.3464567;
 const MM_TO_POINTS = 2.83464567;
-const MAX_PREVIEW_LABELS = 6;
+const MAX_PREVIEW_LABELS = 200;
 const LABELARY_MIN_INTERVAL_MS = 450;
 const LABELARY_MAX_ATTEMPTS = 4;
 const LABEL_PRESETS = {
@@ -58,9 +58,11 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
     const labelsToPreview = payload.labels.slice(0, MAX_PREVIEW_LABELS);
     const previews = [];
 
-    for (const label of labelsToPreview) {
+    for (let globalIndex = 0; globalIndex < labelsToPreview.length; globalIndex += 1) {
+      const label = labelsToPreview[globalIndex];
       const pngBytes = await renderZplToPng(label.zpl, settings);
       previews.push({
+        globalIndex,
         sourceName: label.sourceName,
         index: label.index,
         image: `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`
@@ -100,6 +102,36 @@ app.post("/api/convert", upload.array("files", 20), async (req, res) => {
     );
     res.setHeader("X-Label-Count", String(payload.labels.length));
     res.setHeader("X-Source-Count", String(payload.sources.length));
+    res.setHeader("X-Page-Size", settings.preset.label);
+    res.send(Buffer.from(pdfBytes));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/api/convert-label", upload.array("files", 20), async (req, res) => {
+  try {
+    const settings = getConversionSettings(req.body);
+    const payload = buildLabelPayload(req);
+    const labelIndex = Math.floor(clampNumber(Number(req.body?.labelIndex ?? 0), 0, payload.labels.length - 1));
+    const label = payload.labels[labelIndex];
+    const pdf = await PDFDocument.create();
+    const pngBytes = await renderZplToPng(label.zpl, settings);
+    const image = await pdf.embedPng(pngBytes);
+    const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
+    drawLabelImage(page, image, settings);
+
+    const pdfBytes = await pdf.save();
+    const safeBaseName = payload.baseName.replace(/[^\w.-]+/g, "-");
+    const labelNumber = labelIndex + 1;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeBaseName || "etiqueta"}-${settings.pageSize}-etiqueta-${labelNumber}.pdf"`
+    );
+    res.setHeader("X-Label-Count", "1");
+    res.setHeader("X-Source-Count", "1");
     res.setHeader("X-Page-Size", settings.preset.label);
     res.send(Buffer.from(pdfBytes));
   } catch (error) {

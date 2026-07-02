@@ -62,6 +62,7 @@ function App() {
   const [error, setError] = useState("");
   const [analysis, setAnalysis] = useState(null);
   const [previews, setPreviews] = useState([]);
+  const [selectedPreview, setSelectedPreview] = useState(null);
   const [result, setResult] = useState(null);
 
   const totalSize = useMemo(() => files.reduce((sum, item) => sum + item.file.size, 0), [files]);
@@ -126,6 +127,7 @@ function App() {
       const payload = await response.json();
       setAnalysis(payload);
       setPreviews(payload.previews || []);
+      setSelectedPreview(null);
       setResult(null);
     });
   }
@@ -154,7 +156,30 @@ function App() {
     });
   }
 
-  async function runRequest(action, endpoint, onSuccess) {
+  async function convertSinglePreview(preview) {
+    await runRequest("convert-single", "/api/convert-label", async (response) => {
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const labelNumber = preview.globalIndex + 1;
+      const nextResult = {
+        url: downloadUrl,
+        labelCount: "1",
+        sourceCount: "1",
+        pageSize: response.headers.get("X-Page-Size") || currentPageSizeLabel(),
+        name: `${preview.sourceName.replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "-")}-etiqueta-${labelNumber}-${settings.pageSize}.pdf`,
+        createdAt: new Date().toLocaleString("pt-BR", {
+          dateStyle: "short",
+          timeStyle: "short"
+        })
+      };
+
+      setResult(nextResult);
+      setHistory((current) => [nextResult, ...current].slice(0, 10));
+      triggerDownload(nextResult.url, nextResult.name);
+    }, { labelIndex: String(preview.globalIndex) });
+  }
+
+  async function runRequest(action, endpoint, onSuccess, extraFields = {}) {
     if (!hasInput) {
       setError("Envie arquivos ou cole um código ZPL para continuar.");
       return;
@@ -166,7 +191,7 @@ function App() {
     try {
       const response = await fetch(`${API_URL}${endpoint}`, {
         method: "POST",
-        body: buildFormData()
+        body: buildFormData(extraFields)
       });
 
       if (!response.ok) {
@@ -182,7 +207,7 @@ function App() {
     }
   }
 
-  function buildFormData() {
+  function buildFormData(extraFields = {}) {
     const formData = new FormData();
     files.forEach((item) => formData.append("files", item.file));
     formData.append("rawZpl", rawZpl);
@@ -191,6 +216,7 @@ function App() {
     formData.append("rotation", settings.rotation);
     formData.append("marginMm", settings.marginMm);
     formData.append("scaleMode", settings.scaleMode);
+    Object.entries(extraFields).forEach(([key, value]) => formData.append(key, value));
     return formData;
   }
 
@@ -210,6 +236,7 @@ function App() {
   function clearOutput() {
     setAnalysis(null);
     setPreviews([]);
+    setSelectedPreview(null);
     setResult(null);
   }
 
@@ -296,7 +323,12 @@ function App() {
           {analysis && <AnalysisPanel analysis={analysis} />}
 
           {previews.length > 0 && (
-            <PreviewPanel previews={previews} total={analysis?.labelsCount || previews.length} limit={analysis?.previewLimit} />
+            <PreviewPanel
+              previews={previews}
+              total={analysis?.labelsCount || previews.length}
+              limit={analysis?.previewLimit}
+              onSelect={setSelectedPreview}
+            />
           )}
 
           {result && (
@@ -343,6 +375,15 @@ function App() {
       </section>
 
       <TrustSections />
+
+      {selectedPreview && (
+        <PreviewModal
+          preview={selectedPreview}
+          isGenerating={isWorking === "convert-single"}
+          onClose={() => setSelectedPreview(null)}
+          onDownload={() => convertSinglePreview(selectedPreview)}
+        />
+      )}
     </main>
   );
 }
@@ -495,25 +536,74 @@ function AnalysisPanel({ analysis }) {
   );
 }
 
-function PreviewPanel({ previews, total, limit }) {
+function PreviewPanel({ previews, total, limit, onSelect }) {
   return (
     <section className="preview-panel" aria-label="Pré-visualização das etiquetas">
       <div className="section-title">
         <Eye size={19} aria-hidden="true" />
         <strong>Pré-visualização</strong>
-        {total > previews.length && <span>mostrando {limit} de {total}</span>}
+        <span>
+          {previews.length} de {total} etiqueta(s)
+          {total > previews.length ? `, limite ${limit}` : ""}
+        </span>
       </div>
       <div className="preview-grid">
         {previews.map((preview, index) => (
-          <article key={`${preview.sourceName}-${preview.index}-${index}`}>
+          <button
+            className="preview-card"
+            key={`${preview.sourceName}-${preview.index}-${index}`}
+            onClick={() => onSelect({ ...preview, globalIndex: preview.globalIndex ?? index })}
+            type="button"
+          >
             <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
             <span>
               {preview.sourceName} #{preview.index}
             </span>
-          </article>
+          </button>
         ))}
       </div>
     </section>
+  );
+}
+
+function PreviewModal({ preview, isGenerating, onClose, onDownload }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Etiqueta ampliada">
+      <div className="preview-modal">
+        <div className="modal-header">
+          <div>
+            <strong>Etiqueta #{preview.index}</strong>
+            <span>{preview.sourceName}</span>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Fechar pré-visualização">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="modal-image-frame">
+          <img src={preview.image} alt={`Etiqueta ${preview.index} ampliada`} />
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" onClick={onClose}>
+            Voltar
+          </button>
+          <button className="primary-button" onClick={onDownload} disabled={isGenerating}>
+            {isGenerating ? (
+              <>
+                <LoaderCircle className="spin" size={19} />
+                Gerando
+              </>
+            ) : (
+              <>
+                <ArrowDownToLine size={19} />
+                Gerar PDF desta etiqueta
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -617,6 +707,15 @@ function loadStored(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function triggerDownload(url, name) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function formatBytes(bytes) {
