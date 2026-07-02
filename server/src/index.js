@@ -70,6 +70,7 @@ const DEFAULT_TEMPLATE = {
   }
 };
 let lastLabelaryRequestAt = 0;
+let ocrWorkerPromise = null;
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
 app.use(express.json({ limit: "2mb" }));
@@ -98,12 +99,13 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
       const label = labelsToPreview[globalIndex];
       const pngBytes = await renderZplToPng(label.zpl, settings);
       const footerPngBytes = label.productFooterZpl ? await renderZplToPng(label.productFooterZpl, settings) : null;
+      const imageProductFooter = footerPngBytes ? await extractProductsFromChecklistImage(footerPngBytes) : null;
 
       previews.push({
         globalIndex,
         sourceName: label.sourceName,
         index: label.index,
-        productFooter: label.productFooter,
+        productFooter: imageProductFooter || label.productFooter,
         productFooterImage: footerPngBytes
           ? `data:image/png;base64,${Buffer.from(footerPngBytes).toString("base64")}`
           : null,
@@ -410,6 +412,13 @@ async function drawLabelPage(pdf, page, image, settings, label) {
 
   if (label.productFooterZpl) {
     const footerPngBytes = await renderZplToPng(label.productFooterZpl, settings);
+    const imageProductFooter = await extractProductsFromChecklistImage(footerPngBytes);
+
+    if (imageProductFooter?.lines?.length) {
+      await drawProductFooter(pdf, page, imageProductFooter, settings);
+      return;
+    }
+
     const footerImage = await pdf.embedPng(footerPngBytes);
     drawImageFooter(page, footerImage, settings, label);
     return;
@@ -712,6 +721,158 @@ function normalizeProductCandidates(candidates) {
   };
 }
 
+async function extractProductsFromChecklistImage(pngBytes) {
+  try {
+    const text = await recognizeTextFromImage(pngBytes);
+    return normalizeOcrProductText(text);
+  } catch (error) {
+    console.warn("OCR indisponível ou sem leitura útil:", error?.message || error);
+    return null;
+  }
+}
+
+async function recognizeTextFromImage(pngBytes) {
+  const worker = await getOcrWorker();
+  const variants = await buildOcrImageVariants(pngBytes);
+  let bestText = "";
+  let bestScore = 0;
+
+  for (const variant of variants) {
+    const result = await worker.recognize(Buffer.from(variant));
+    const text = result?.data?.text || "";
+    const score = scoreOcrText(text);
+
+    if (score > bestScore) {
+      bestText = text;
+      bestScore = score;
+    }
+  }
+
+  return bestText;
+}
+
+async function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = createOcrWorker();
+  }
+
+  return ocrWorkerPromise;
+}
+
+async function createOcrWorker() {
+  const { createWorker } = await import("tesseract.js");
+
+  try {
+    return await createWorker("por");
+  } catch {
+    return createWorker("eng");
+  }
+}
+
+async function buildOcrImageVariants(pngBytes) {
+  const variants = [Buffer.from(pngBytes)];
+
+  try {
+    const { default: sharp } = await import("sharp");
+    const rotations = [90, 270, 180];
+
+    for (const rotation of rotations) {
+      const rotated = await sharp(Buffer.from(pngBytes)).rotate(rotation).png().toBuffer();
+      variants.push(rotated);
+
+      const metadata = await sharp(rotated).metadata();
+      if (metadata.width && metadata.height) {
+        const cropTop = Math.floor(metadata.height * 0.52);
+        const cropHeight = metadata.height - cropTop;
+        if (cropHeight > 20) {
+          variants.push(
+            await sharp(rotated)
+              .extract({ left: 0, top: cropTop, width: metadata.width, height: cropHeight })
+              .resize({ width: Math.max(metadata.width * 2, 1200), withoutEnlargement: false })
+              .grayscale()
+              .png()
+              .toBuffer()
+          );
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("Pré-processamento de OCR indisponível:", error?.message || error);
+  }
+
+  return dedupeBuffers(variants).slice(0, 6);
+}
+
+function scoreOcrText(text) {
+  const normalized = normalizeOcrProductText(text);
+  if (!normalized?.lines?.length) return 0;
+
+  return (
+    normalized.lines.length * 10 +
+    normalized.lines.reduce((sum, item) => sum + Math.min(item.text.length, 80), 0)
+  );
+}
+
+function normalizeOcrProductText(text) {
+  const lines = String(text)
+    .split(/\r?\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const productHeaderIndex = lines.findIndex((line) => /produto/i.test(line));
+  const candidateLines = (productHeaderIndex >= 0 ? lines.slice(productHeaderIndex + 1) : lines)
+    .filter((line) => !isOcrNoiseLine(line))
+    .map(parseOcrProductLine)
+    .filter((item) => item.text.length >= 4);
+  const products = dedupeProducts(candidateLines).slice(0, 12);
+
+  if (!products.length) return null;
+
+  return {
+    skuCount: products.length,
+    itemsCount: products.reduce((sum, item) => sum + (item.quantity || 1), 0),
+    lines: products
+  };
+}
+
+function isOcrNoiseLine(line) {
+  return (
+    /^(shopee|checklist|id pedido|pedido|nf|série|serie|emissão|emissao|sku|qnt|quantidade|variação|variacao)$/i.test(
+      line
+    ) ||
+    /atenção|atencao|vendedor|pacote|controle/i.test(line) ||
+    /^[\W_]+$/.test(line) ||
+    /^\d+$/.test(line)
+  );
+}
+
+function parseOcrProductLine(line) {
+  const withoutPrefix = line
+    .replace(/^[✓✔*\-•\s]+/, "")
+    .replace(/^\d+\s*[-.)]?\s*/, "")
+    .trim();
+  const quantityMatch =
+    withoutPrefix.match(/(?:^|\s)(\d+)\s*x\s+(.+)/i) || withoutPrefix.match(/(.+?)\s+(\d+)\s*$/);
+
+  if (quantityMatch?.[2] && /^\d+$/.test(quantityMatch[2])) {
+    return {
+      quantity: Number(quantityMatch[2]),
+      text: quantityMatch[1].trim()
+    };
+  }
+
+  if (quantityMatch?.[1] && quantityMatch?.[2]) {
+    return {
+      quantity: Number(quantityMatch[1]),
+      text: quantityMatch[2].trim()
+    };
+  }
+
+  return {
+    quantity: null,
+    text: withoutPrefix
+  };
+}
+
 function isProductLine(line) {
   return /^(✓|✔|-|\*)\s*\S+/.test(line) || /^\d+\s*x\s+\S+/i.test(line);
 }
@@ -737,6 +898,17 @@ function dedupeProducts(lines) {
   const seen = new Set();
   return lines.filter((line) => {
     const key = `${line.quantity || ""}:${line.text}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeBuffers(buffers) {
+  const seen = new Set();
+
+  return buffers.filter((buffer) => {
+    const key = `${buffer.length}:${buffer.subarray(0, 24).toString("base64")}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

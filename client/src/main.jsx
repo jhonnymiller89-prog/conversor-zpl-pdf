@@ -713,11 +713,7 @@ function PreviewImage({ preview, index }) {
   return (
     <div className="preview-composed">
       <img src={preview.image} alt={`Etiqueta ${index + 1}`} />
-      {preview.productFooterImage ? (
-        <div className="preview-footer preview-footer-image">
-          <img src={preview.productFooterImage} alt={`Lista da etiqueta ${index + 1}`} />
-        </div>
-      ) : (
+      {preview.productFooter?.lines?.length ? (
         <div className="preview-footer">
           <strong>
             {preview.productFooter.skuCount ? `SKU: ${preview.productFooter.skuCount}` : ""}
@@ -731,7 +727,11 @@ function PreviewImage({ preview, index }) {
             </small>
           ))}
         </div>
-      )}
+      ) : preview.productFooterImage ? (
+        <div className="preview-footer preview-footer-image">
+          <img src={preview.productFooterImage} alt={`Lista da etiqueta ${index + 1}`} />
+        </div>
+      ) : null}
     </div>
   );
 }
