@@ -4,6 +4,7 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import {
   PDFDocument,
   StandardFonts,
@@ -99,9 +100,13 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
       const label = labelsToPreview[globalIndex];
       const pngBytes = await renderZplToPng(label.zpl, settings);
       const footerPngBytes = label.productFooterZpl ? await renderZplToPng(label.productFooterZpl, settings) : null;
-      const imageProductFooter = footerPngBytes ? await extractProductsFromChecklistImage(footerPngBytes) : null;
+      const shouldUseEmbeddedFooter = hasEmbeddedZplGraphic(label.productFooterZpl);
+      const imageProductFooter =
+        footerPngBytes && !shouldUseEmbeddedFooter ? await extractProductsFromChecklistImage(footerPngBytes) : null;
       const previewFooterPngBytes =
-        footerPngBytes && !imageProductFooter?.lines?.length ? await prepareChecklistFooterImage(footerPngBytes) : null;
+        footerPngBytes && (shouldUseEmbeddedFooter || !imageProductFooter?.lines?.length)
+          ? await prepareChecklistFooterImage(footerPngBytes, label.productFooterZpl)
+          : null;
 
       previews.push({
         globalIndex,
@@ -414,14 +419,15 @@ async function drawLabelPage(pdf, page, image, settings, label) {
 
   if (label.productFooterZpl) {
     const footerPngBytes = await renderZplToPng(label.productFooterZpl, settings);
-    const imageProductFooter = await extractProductsFromChecklistImage(footerPngBytes);
+    const shouldUseEmbeddedFooter = hasEmbeddedZplGraphic(label.productFooterZpl);
+    const imageProductFooter = shouldUseEmbeddedFooter ? null : await extractProductsFromChecklistImage(footerPngBytes);
 
     if (imageProductFooter?.lines?.length) {
       await drawProductFooter(pdf, page, imageProductFooter, settings);
       return;
     }
 
-    const preparedFooterPngBytes = await prepareChecklistFooterImage(footerPngBytes);
+    const preparedFooterPngBytes = await prepareChecklistFooterImage(footerPngBytes, label.productFooterZpl);
     const preparedFooterImage = await pdf.embedPng(preparedFooterPngBytes);
     drawImageFooter(page, preparedFooterImage, settings, label);
     return;
@@ -461,8 +467,8 @@ function drawLabelImage(page, image, settings, area) {
   const targetHeight = Math.max(Math.min(areaHeight, contentHeight), 1);
   const fitScale = Math.min(targetWidth / imageBoxWidth, targetHeight / imageBoxHeight);
   const fillScale = Math.max(targetWidth / imageBoxWidth, targetHeight / imageBoxHeight);
-  const scale =
-    settings.scaleMode === "original" ? fitScale : settings.scaleMode === "fill" ? fillScale : fitScale;
+  const selectedScaleMode = area ? "fit" : settings.scaleMode;
+  const scale = selectedScaleMode === "original" ? fitScale : selectedScaleMode === "fill" ? fillScale : fitScale;
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
   const boxWidth = imageBoxWidth * scale;
@@ -553,7 +559,7 @@ function drawImageFooter(page, image, settings, label) {
 }
 
 function getFooterHeightMm(label, settings) {
-  if (label.productFooterZpl) return 23;
+  if (label.productFooterZpl) return 26;
   return Number(settings.template.footer.heightMm) || DEFAULT_TEMPLATE.footer.heightMm;
 }
 
@@ -801,9 +807,12 @@ async function buildOcrImageVariants(pngBytes) {
   return dedupeBuffers(variants).slice(0, 6);
 }
 
-async function prepareChecklistFooterImage(pngBytes) {
+async function prepareChecklistFooterImage(pngBytes, zpl = "") {
   try {
     const { default: sharp } = await import("sharp");
+    const embeddedFooter = await extractEmbeddedChecklistTable(zpl, sharp);
+    if (embeddedFooter) return embeddedFooter;
+
     const source = Buffer.from(pngBytes);
     const candidates = [];
 
@@ -851,6 +860,139 @@ async function prepareChecklistFooterImage(pngBytes) {
     console.warn("Recorte do checklist indisponível:", error?.message || error);
     return Buffer.from(pngBytes);
   }
+}
+
+async function extractEmbeddedChecklistTable(zpl, sharp) {
+  const image = decodeEmbeddedZplGraphic(zpl);
+  if (!image) return null;
+
+  const landscape = await sharp(image.rgba, {
+    raw: {
+      width: image.width,
+      height: image.height,
+      channels: 4
+    }
+  })
+    .rotate(90)
+    .flatten({ background: "#ffffff" })
+    .png()
+    .toBuffer();
+  const metadata = await sharp(landscape).metadata();
+  if (!metadata.width || !metadata.height) return landscape;
+
+  const tableCrop = {
+    left: Math.floor(metadata.width * 0.025),
+    top: Math.floor(metadata.height * 0.275),
+    width: Math.floor(metadata.width * 0.95),
+    height: Math.floor(metadata.height * 0.17)
+  };
+
+  const compactTable = await cropCompactChecklistTable(landscape, metadata, sharp);
+  if (compactTable) return compactTable;
+
+  return cropAndPadImage(landscape, tableCrop, sharp);
+}
+
+async function cropCompactChecklistTable(imageBytes, metadata, sharp) {
+  const tableTop = Math.floor(metadata.height * 0.275);
+  const tableHeight = Math.floor(metadata.height * 0.17);
+  const productCrop = safeCrop(metadata, {
+    left: Math.floor(metadata.width * 0.025),
+    top: tableTop,
+    width: Math.floor(metadata.width * 0.435),
+    height: tableHeight
+  });
+  const quantityCrop = safeCrop(metadata, {
+    left: Math.floor(metadata.width * 0.775),
+    top: tableTop,
+    width: Math.floor(metadata.width * 0.052),
+    height: tableHeight
+  });
+
+  if (!productCrop || !quantityCrop) return null;
+
+  const productColumn = await sharp(imageBytes).extract(productCrop).png().toBuffer();
+  const quantityColumn = await sharp(imageBytes).extract(quantityCrop).png().toBuffer();
+  const gap = 18;
+  const width = productCrop.width + quantityCrop.width + gap;
+  const height = Math.max(productCrop.height, quantityCrop.height);
+
+  const compact = await sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: "#ffffff"
+    }
+  })
+    .composite([
+      { input: productColumn, left: 0, top: 0 },
+      { input: quantityColumn, left: productCrop.width + gap, top: 0 }
+    ])
+    .png()
+    .toBuffer();
+
+  return sharp(compact)
+    .trim({ background: "#ffffff", threshold: 12 })
+    .extend({ top: 8, bottom: 8, left: 8, right: 8, background: "#ffffff" })
+    .png()
+    .toBuffer();
+}
+
+async function cropAndPadImage(imageBytes, crop, sharp) {
+  return sharp(imageBytes)
+    .extract(crop)
+    .trim({ background: "#ffffff", threshold: 12 })
+    .extend({ top: 8, bottom: 8, left: 8, right: 8, background: "#ffffff" })
+    .png()
+    .toBuffer();
+}
+
+function safeCrop(metadata, crop) {
+  const left = clampNumber(crop.left, 0, metadata.width - 1);
+  const top = clampNumber(crop.top, 0, metadata.height - 1);
+  const width = clampNumber(crop.width, 1, metadata.width - left);
+  const height = clampNumber(crop.height, 1, metadata.height - top);
+
+  if (width < 2 || height < 2) return null;
+  return { left, top, width, height };
+}
+
+function decodeEmbeddedZplGraphic(zpl) {
+  const match = String(zpl).match(/~DGR:[^,]+,(\d+),(\d+),:Z64:([A-Za-z0-9+/=\s]+):[A-F0-9]{4}/i);
+  if (!match) return null;
+
+  try {
+    const totalBytes = Number(match[1]);
+    const rowBytes = Number(match[2]);
+    const compressed = Buffer.from(match[3].replace(/\s+/g, ""), "base64");
+    const bitmap = zlib.inflateSync(compressed);
+    const height = Math.floor(totalBytes / rowBytes);
+    const width = rowBytes * 8;
+    const rgba = Buffer.alloc(width * height * 4, 255);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const byte = bitmap[y * rowBytes + (x >> 3)];
+        const isBlack = (byte >> (7 - (x & 7))) & 1;
+        const color = isBlack ? 0 : 255;
+        const offset = (y * width + x) * 4;
+        rgba[offset] = color;
+        rgba[offset + 1] = color;
+        rgba[offset + 2] = color;
+        rgba[offset + 3] = 255;
+      }
+    }
+
+    return { width, height, rgba };
+  } catch (error) {
+    console.warn("Não foi possível decodificar a imagem ZPL do checklist:", error?.message || error);
+    return null;
+  }
+}
+
+function hasEmbeddedZplGraphic(zpl) {
+  return /~DGR:[^,]+,\d+,\d+,:Z64:/i.test(String(zpl || ""));
 }
 
 async function orientFooterImage(imageBytes) {
