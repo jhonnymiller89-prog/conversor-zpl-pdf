@@ -2,7 +2,7 @@ import AdmZip from "adm-zip";
 import cors from "cors";
 import express from "express";
 import multer from "multer";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
@@ -32,6 +32,11 @@ const upload = multer({
 
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || "127.0.0.1";
+const AUTH_COOKIE_NAME = "zpl_session";
+const AUTH_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const AUTH_USER = process.env.APP_USER || "jmcosmeticos";
+const AUTH_PASSWORD = process.env.APP_PASSWORD || "";
+const AUTH_SECRET = process.env.SESSION_SECRET || AUTH_PASSWORD || randomBytes(32).toString("hex");
 const CM_TO_POINTS = 28.3464567;
 const MM_TO_POINTS = 2.83464567;
 const MAX_FAST_PREVIEW_LABELS = 200;
@@ -79,12 +84,47 @@ let lastLabelaryRequestAt = 0;
 let ocrWorkerPromise = null;
 const conversionJobs = new Map();
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173", credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
+
+app.get("/api/auth/session", (req, res) => {
+  const session = getSession(req);
+  res.json({
+    authenticated: Boolean(session),
+    user: session?.user || null,
+    configured: Boolean(AUTH_PASSWORD)
+  });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  if (!AUTH_PASSWORD) {
+    res.status(503).json({ error: "Login ainda não configurado no servidor." });
+    return;
+  }
+
+  const username = String(req.body?.username || "").trim();
+  const password = String(req.body?.password || "");
+
+  if (!safeEqual(username, AUTH_USER) || !safeEqual(password, AUTH_PASSWORD)) {
+    res.status(401).json({ error: "Usuário ou senha inválidos." });
+    return;
+  }
+
+  const token = createSessionToken({ user: AUTH_USER, exp: Date.now() + AUTH_SESSION_TTL_MS });
+  res.cookie(AUTH_COOKIE_NAME, token, getAuthCookieOptions());
+  res.json({ authenticated: true, user: AUTH_USER });
+});
+
+app.post("/api/auth/logout", (_req, res) => {
+  res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
+  res.json({ authenticated: false });
+});
+
+app.use("/api", requireAuth);
 
 app.post("/api/analyze", upload.array("files", 20), async (req, res) => {
   try {
@@ -368,6 +408,83 @@ function cleanupConversionJobs() {
   for (const [jobId, job] of conversionJobs.entries()) {
     if (job.createdAt < expiresBefore) conversionJobs.delete(jobId);
   }
+}
+
+function requireAuth(req, res, next) {
+  if (!AUTH_PASSWORD) {
+    res.status(503).json({ error: "Login ainda não configurado no servidor." });
+    return;
+  }
+
+  if (getSession(req)) {
+    next();
+    return;
+  }
+
+  res.status(401).json({ error: "Faça login para acessar o conversor." });
+}
+
+function getSession(req) {
+  const token = parseCookies(req.headers.cookie)[AUTH_COOKIE_NAME];
+  return verifySessionToken(token);
+}
+
+function createSessionToken(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = signValue(body);
+  return `${body}.${signature}`;
+}
+
+function verifySessionToken(token) {
+  if (!token || !token.includes(".")) return null;
+
+  const [body, signature] = token.split(".");
+  if (!body || !signature || !safeEqual(signature, signValue(body))) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload?.user || !payload?.exp || payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function signValue(value) {
+  return createHmac("sha256", AUTH_SECRET).update(value).digest("base64url");
+}
+
+function parseCookies(cookieHeader = "") {
+  return String(cookieHeader)
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .reduce((cookies, item) => {
+      const separator = item.indexOf("=");
+      if (separator < 0) return cookies;
+      cookies[decodeURIComponent(item.slice(0, separator))] = decodeURIComponent(item.slice(separator + 1));
+      return cookies;
+    }, {});
+}
+
+function getAuthCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: AUTH_SESSION_TTL_MS,
+    path: "/"
+  };
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  const length = Math.max(leftBuffer.length, rightBuffer.length);
+  const leftPadded = Buffer.concat([leftBuffer, Buffer.alloc(length - leftBuffer.length)]);
+  const rightPadded = Buffer.concat([rightBuffer, Buffer.alloc(length - rightBuffer.length)]);
+
+  return timingSafeEqual(leftPadded, rightPadded) && leftBuffer.length === rightBuffer.length;
 }
 
 app.use(express.static(clientDistPath));

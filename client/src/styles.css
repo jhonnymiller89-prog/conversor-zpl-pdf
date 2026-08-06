@@ -18,6 +18,52 @@ body {
   min-height: 100vh;
 }
 
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 247, 251, 0.98)),
+    repeating-linear-gradient(90deg, rgba(30, 89, 154, 0.06) 0 1px, transparent 1px 92px);
+}
+
+.auth-card {
+  display: grid;
+  gap: 18px;
+  width: min(440px, 100%);
+  padding: 28px;
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(27, 50, 84, 0.14);
+}
+
+.auth-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #184c86;
+}
+
+.auth-title h1 {
+  font-size: 2.15rem;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form input {
+  min-height: 48px;
+  padding: 0 13px;
+  border: 1px solid #cbd7e8;
+  border-radius: 8px;
+  color: #101828;
+  background: #ffffff;
+}
+
 button,
 input,
 a,
@@ -290,6 +336,19 @@ p {
   min-height: 38px;
   padding: 0 12px;
   font-weight: 750;
+}
+
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid #dbe5f2;
+  border-radius: 8px;
+  color: #405268;
+  background: #ffffff;
+  font-weight: 800;
 }
 
 .options-panel,

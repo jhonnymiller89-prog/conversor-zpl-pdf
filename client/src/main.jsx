@@ -9,6 +9,7 @@ import {
   History,
   LoaderCircle,
   LockKeyhole,
+  LogOut,
   Plus,
   RotateCw,
   Settings2,
@@ -82,6 +83,7 @@ function App() {
   const [template, setTemplate] = useState(loadStored("zpl-template", DEFAULT_TEMPLATE));
   const [profile, setProfile] = useState(loadStored("zpl-profile", { name: "" }));
   const [history, setHistory] = useState(loadStored("zpl-history", []));
+  const [auth, setAuth] = useState({ status: "checking", user: null, error: "" });
   const [isDragging, setIsDragging] = useState(false);
   const [isWorking, setIsWorking] = useState("");
   const [error, setError] = useState("");
@@ -92,6 +94,10 @@ function App() {
 
   const totalSize = useMemo(() => files.reduce((sum, item) => sum + item.file.size, 0), [files]);
   const hasInput = files.length > 0 || rawZpl.trim().length > 0;
+
+  useEffect(() => {
+    checkSession();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("zpl-settings", JSON.stringify(settings));
@@ -160,6 +166,44 @@ function App() {
     if (rejected.length) setError("Alguns arquivos foram ignorados. Use apenas .zpl, .txt ou .zip.");
   }
 
+  async function checkSession() {
+    try {
+      const response = await fetch(`${API_URL}/api/auth/session`, { credentials: "include" });
+      const payload = await response.json();
+      setAuth({
+        status: payload.authenticated ? "authenticated" : "anonymous",
+        user: payload.user || null,
+        error: payload.configured ? "" : "Login ainda não configurado no servidor."
+      });
+    } catch {
+      setAuth({ status: "anonymous", user: null, error: "Não foi possível verificar o login." });
+    }
+  }
+
+  async function login(username, password) {
+    setAuth((current) => ({ ...current, error: "" }));
+
+    const response = await fetch(`${API_URL}/api/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Não foi possível entrar.");
+    }
+
+    setAuth({ status: "authenticated", user: payload.user, error: "" });
+  }
+
+  async function logout() {
+    await fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" }).catch(() => null);
+    clearOutput();
+    setAuth({ status: "anonymous", user: null, error: "" });
+  }
+
   async function analyzeInput() {
     await runRequest("analyze", "/api/analyze", async (response) => {
       setAnalysis(await response.json());
@@ -219,7 +263,9 @@ function App() {
     for (let attempt = 0; attempt < 180; attempt += 1) {
       await delay(2000);
 
-      const statusResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}`);
+      const statusResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}`, {
+        credentials: "include"
+      });
       const statusPayload = await statusResponse.json().catch(() => null);
 
       if (!statusResponse.ok) {
@@ -232,7 +278,9 @@ function App() {
 
       if (statusPayload.status !== "ready") continue;
 
-      const downloadResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}/download`);
+      const downloadResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}/download`, {
+        credentials: "include"
+      });
       if (downloadResponse.status === 202) continue;
 
       if (!downloadResponse.ok) {
@@ -282,6 +330,7 @@ function App() {
     try {
       const response = await fetch(`${API_URL}${endpoint}`, {
         method: "POST",
+        credentials: "include",
         body: buildFormData(extraFields)
       });
 
@@ -349,6 +398,14 @@ function App() {
     return PAGE_SIZES.find((item) => item.value === settings.pageSize)?.label || "10 x 15 cm";
   }
 
+  if (auth.status === "checking") {
+    return <LoadingScreen />;
+  }
+
+  if (auth.status !== "authenticated") {
+    return <LoginScreen onLogin={login} error={auth.error} />;
+  }
+
   return (
     <main className="page-shell">
       <section className="workspace">
@@ -361,6 +418,10 @@ function App() {
           </p>
 
           <LocalPanel profile={profile} setProfile={setProfile} history={history} setHistory={setHistory} />
+          <button className="logout-button" onClick={logout} type="button">
+            <LogOut size={17} aria-hidden="true" />
+            Sair
+          </button>
         </aside>
 
         <section className="converter-panel" aria-label="Conversor de etiquetas ZPL para PDF">
@@ -486,6 +547,78 @@ function App() {
           onDownload={() => convertSinglePreview(selectedPreview)}
         />
       )}
+    </main>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <main className="auth-shell">
+      <section className="auth-card">
+        <LoaderCircle className="spin" size={28} aria-hidden="true" />
+        <strong>Verificando acesso</strong>
+      </section>
+    </main>
+  );
+}
+
+function LoginScreen({ onLogin, error }) {
+  const [username, setUsername] = useState("jmcosmeticos");
+  const [password, setPassword] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setLocalError("");
+
+    try {
+      await onLogin(username, password);
+    } catch (loginError) {
+      setLocalError(loginError.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card" aria-label="Login do conversor ZPL">
+        <span className="eyebrow">Acesso privado</span>
+        <div className="auth-title">
+          <LockKeyhole size={26} aria-hidden="true" />
+          <h1>Conversor ZPL</h1>
+        </div>
+        <p>Entre com o usuário e senha da empresa para acessar o conversor.</p>
+
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <label>
+            Usuário
+            <input
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Senha
+            <input
+              autoComplete="current-password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </label>
+          {(localError || error) && <p className="message error">{localError || error}</p>}
+          <button className="primary-button" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? <LoaderCircle className="spin" size={20} aria-hidden="true" /> : <LockKeyhole size={20} />}
+            Entrar
+          </button>
+        </form>
+      </section>
     </main>
   );
 }

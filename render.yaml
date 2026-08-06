@@ -8,3 +8,9 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: APP_USER
+        value: jmcosmeticos
+      - key: APP_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
