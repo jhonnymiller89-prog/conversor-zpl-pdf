@@ -179,26 +179,13 @@ function App() {
 
   async function convertInput() {
     await runRequest("convert", "/api/convert", async (response) => {
-      const blob = await response.blob();
-      const downloadUrl = URL.createObjectURL(blob);
-      const labelCount = response.headers.get("X-Label-Count") || "1";
-      const sourceCount = response.headers.get("X-Source-Count") || "1";
-      const finalPageSize = response.headers.get("X-Page-Size") || currentPageSizeLabel();
-      const nextResult = {
-        url: downloadUrl,
-        labelCount,
-        sourceCount,
-        pageSize: finalPageSize,
-        name: buildDownloadName(),
-        createdAt: new Date().toLocaleString("pt-BR", {
-          dateStyle: "short",
-          timeStyle: "short"
-        })
-      };
+      if (response.status === 202) {
+        const payload = await response.json();
+        await waitForConversionJob(payload.jobId);
+        return;
+      }
 
-      setResult(nextResult);
-      setHistory((current) => [nextResult, ...current].slice(0, 10));
-      triggerDownload(nextResult.url, nextResult.name);
+      await savePdfResponse(response);
     });
   }
 
@@ -223,6 +210,63 @@ function App() {
       setHistory((current) => [nextResult, ...current].slice(0, 10));
       triggerDownload(nextResult.url, nextResult.name);
     }, { labelIndex: String(preview.globalIndex) });
+  }
+
+  async function waitForConversionJob(jobId) {
+    if (!jobId) throw new Error("Não foi possível iniciar a conversão do arquivo grande.");
+
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      await delay(2000);
+
+      const statusResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}`);
+      const statusPayload = await statusResponse.json().catch(() => null);
+
+      if (!statusResponse.ok) {
+        throw new Error(statusPayload?.error || "Não foi possível consultar a conversão.");
+      }
+
+      if (statusPayload.status === "failed") {
+        throw new Error(statusPayload.error || "Não foi possível gerar o PDF.");
+      }
+
+      if (statusPayload.status !== "ready") continue;
+
+      const downloadResponse = await fetch(`${API_URL}/api/convert-jobs/${jobId}/download`);
+      if (downloadResponse.status === 202) continue;
+
+      if (!downloadResponse.ok) {
+        const downloadPayload = await downloadResponse.json().catch(() => null);
+        throw new Error(downloadPayload?.error || "O PDF ficou pronto, mas não foi possível baixar.");
+      }
+
+      await savePdfResponse(downloadResponse);
+      return;
+    }
+
+    throw new Error("A conversão demorou mais que o esperado. Tente novamente em instantes.");
+  }
+
+  async function savePdfResponse(response) {
+    const blob = await response.blob();
+    const downloadUrl = URL.createObjectURL(blob);
+    const labelCount = response.headers.get("X-Label-Count") || "1";
+    const sourceCount = response.headers.get("X-Source-Count") || "1";
+    const finalPageSize = response.headers.get("X-Page-Size") || currentPageSizeLabel();
+    const nextResult = {
+      url: downloadUrl,
+      labelCount,
+      sourceCount,
+      pageSize: finalPageSize,
+      name: buildDownloadName(),
+      createdAt: new Date().toLocaleString("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "short"
+      })
+    };
+
+    setResult(nextResult);
+    setHistory((current) => [nextResult, ...current].slice(0, 10));
+    triggerDownload(nextResult.url, nextResult.name);
   }
 
   async function runRequest(action, endpoint, onSuccess, extraFields = {}) {
@@ -251,6 +295,10 @@ function App() {
     } finally {
       setIsWorking("");
     }
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   function buildFormData(extraFields = {}) {

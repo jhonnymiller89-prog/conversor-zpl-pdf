@@ -2,6 +2,7 @@ import AdmZip from "adm-zip";
 import cors from "cors";
 import express from "express";
 import multer from "multer";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
@@ -34,6 +35,8 @@ const CM_TO_POINTS = 28.3464567;
 const MM_TO_POINTS = 2.83464567;
 const MAX_FAST_PREVIEW_LABELS = 200;
 const MAX_EXTERNAL_PREVIEW_LABELS = 24;
+const ASYNC_CONVERT_LABEL_THRESHOLD = 80;
+const JOB_TTL_MS = 15 * 60 * 1000;
 const LABELARY_MIN_INTERVAL_MS = 450;
 const LABELARY_MAX_ATTEMPTS = 4;
 const LABEL_PRESETS = {
@@ -73,6 +76,7 @@ const DEFAULT_TEMPLATE = {
 };
 let lastLabelaryRequestAt = 0;
 let ocrWorkerPromise = null;
+const conversionJobs = new Map();
 
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || "http://localhost:5173" }));
 app.use(express.json({ limit: "2mb" }));
@@ -136,30 +140,56 @@ app.post("/api/convert", upload.array("files", 20), async (req, res) => {
   try {
     const settings = getConversionSettings(req.body);
     const payload = buildLabelPayload(req);
-    const pdf = await PDFDocument.create();
 
-    for (const label of payload.labels) {
-      const pngBytes = await renderZplToPng(label.zpl, settings);
-      const image = await pdf.embedPng(pngBytes);
-      const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
-      await drawLabelPage(pdf, page, image, settings, label);
+    if (payload.labels.length >= ASYNC_CONVERT_LABEL_THRESHOLD) {
+      const job = createConversionJob(payload, settings);
+      res.status(202).json({
+        jobId: job.id,
+        labelsCount: payload.labels.length,
+        message: "Arquivo grande recebido. O PDF está sendo preparado para download."
+      });
+      return;
     }
 
-    const pdfBytes = await pdf.save();
-    const safeBaseName = payload.baseName.replace(/[^\w.-]+/g, "-");
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${safeBaseName || "etiquetas"}-${settings.pageSize}.pdf"`
-    );
-    res.setHeader("X-Label-Count", String(payload.labels.length));
-    res.setHeader("X-Source-Count", String(payload.sources.length));
-    res.setHeader("X-Page-Size", settings.preset.label);
-    res.send(Buffer.from(pdfBytes));
+    const pdfBytes = await createPdfBytes(payload, settings);
+    sendPdf(res, pdfBytes, payload, settings);
   } catch (error) {
     sendError(res, error);
   }
+});
+
+app.get("/api/convert-jobs/:jobId", (req, res) => {
+  const job = conversionJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "Conversão não encontrada ou expirada. Gere o PDF novamente." });
+    return;
+  }
+
+  res.json({
+    status: job.status,
+    labelsCount: job.labelsCount,
+    error: job.error || null
+  });
+});
+
+app.get("/api/convert-jobs/:jobId/download", (req, res) => {
+  const job = conversionJobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "Conversão não encontrada ou expirada. Gere o PDF novamente." });
+    return;
+  }
+
+  if (job.status === "failed") {
+    res.status(422).json({ error: job.error || "Não foi possível gerar o PDF." });
+    return;
+  }
+
+  if (job.status !== "ready" || !job.pdfBytes) {
+    res.status(202).json({ status: job.status });
+    return;
+  }
+
+  sendPdf(res, job.pdfBytes, job.payload, job.settings);
 });
 
 app.post("/api/convert-label", upload.array("files", 20), async (req, res) => {
@@ -191,6 +221,73 @@ app.post("/api/convert-label", upload.array("files", 20), async (req, res) => {
     sendError(res, error);
   }
 });
+
+function createConversionJob(payload, settings) {
+  cleanupConversionJobs();
+
+  const job = {
+    id: randomUUID(),
+    status: "processing",
+    labelsCount: payload.labels.length,
+    payload,
+    settings,
+    pdfBytes: null,
+    error: null,
+    createdAt: Date.now()
+  };
+
+  conversionJobs.set(job.id, job);
+
+  setImmediate(async () => {
+    try {
+      job.pdfBytes = await createPdfBytes(payload, settings);
+      job.status = "ready";
+    } catch (error) {
+      console.error(error);
+      job.error =
+        error?.publicMessage ||
+        "Não foi possível gerar o PDF grande agora. Tente novamente em instantes.";
+      job.status = "failed";
+    }
+  });
+
+  return job;
+}
+
+async function createPdfBytes(payload, settings) {
+  const pdf = await PDFDocument.create();
+
+  for (const label of payload.labels) {
+    const pngBytes = await renderZplToPng(label.zpl, settings);
+    const image = await pdf.embedPng(pngBytes);
+    const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
+    await drawLabelPage(pdf, page, image, settings, label);
+  }
+
+  return Buffer.from(await pdf.save());
+}
+
+function sendPdf(res, pdfBytes, payload, settings) {
+  const safeBaseName = payload.baseName.replace(/[^\w.-]+/g, "-");
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${safeBaseName || "etiquetas"}-${settings.pageSize}.pdf"`
+  );
+  res.setHeader("X-Label-Count", String(payload.labels.length));
+  res.setHeader("X-Source-Count", String(payload.sources.length));
+  res.setHeader("X-Page-Size", settings.preset.label);
+  res.send(Buffer.from(pdfBytes));
+}
+
+function cleanupConversionJobs() {
+  const expiresBefore = Date.now() - JOB_TTL_MS;
+
+  for (const [jobId, job] of conversionJobs.entries()) {
+    if (job.createdAt < expiresBefore) conversionJobs.delete(jobId);
+  }
+}
 
 app.use(express.static(clientDistPath));
 
