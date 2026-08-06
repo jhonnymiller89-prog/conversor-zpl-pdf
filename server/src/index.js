@@ -377,6 +377,7 @@ app.get("*", (_req, res) => {
 });
 
 function buildLabelPayload(req) {
+  const options = getPayloadOptions(req.body);
   const sources = [
     ...(req.files || []).flatMap(extractSources),
     ...extractRawZplSources(req.body?.rawZpl)
@@ -389,7 +390,7 @@ function buildLabelPayload(req) {
     throw error;
   }
 
-  const labels = sources.flatMap((source) => normalizeSourceLabels(source));
+  const labels = sources.flatMap((source) => normalizeSourceLabels(source, options));
 
   if (labels.length === 0) {
     const error = new Error("Nenhuma etiqueta ZPL válida foi encontrada.");
@@ -408,6 +409,12 @@ function buildLabelPayload(req) {
     labels,
     sources,
     warnings: buildWarnings(sources, labels)
+  };
+}
+
+function getPayloadOptions(body) {
+  return {
+    mergePackingList: body?.mergePackingList !== "false"
   };
 }
 
@@ -497,9 +504,9 @@ function extractPrintableLabels(content) {
   return labels;
 }
 
-function normalizeSourceLabels(source) {
+function normalizeSourceLabels(source, options = { mergePackingList: true }) {
   const entries = extractPrintableLabels(source.content);
-  const shouldMergeImageChecklist = shouldMergePairedChecklist(source, entries);
+  const shouldMergeImageChecklist = options.mergePackingList && shouldMergePairedChecklist(source, entries);
   const labels = [];
 
   if (shouldMergeImageChecklist) {
@@ -532,7 +539,7 @@ function shouldMergePairedChecklist(source, entries) {
   if (entries.length < 2 || entries.length % 2 !== 0) return false;
   if (entries.some((entry) => entry.productFooter?.lines?.length)) return false;
 
-  return /(lista|checklist|produto|pedido|separacao|separação)/i.test(source.name);
+  return /(lista|list|checklist|packing|produto|pedido|romaneio|separacao|separação)/i.test(source.name);
 }
 
 function countLabelBlocks(content) {

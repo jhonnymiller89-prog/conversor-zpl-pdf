@@ -51,6 +51,7 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_TEMPLATE = {
   id: "jm-cosmeticos",
   name: "JM Cosméticos",
+  mergePackingList: true,
   footer: {
     enabled: true,
     heightMm: 30,
@@ -311,6 +312,7 @@ function App() {
     formData.append("marginMm", settings.marginMm);
     formData.append("scaleMode", settings.scaleMode);
     formData.append("templateJson", JSON.stringify(template));
+    formData.append("mergePackingList", template.mergePackingList ? "true" : "false");
     Object.entries(extraFields).forEach(([key, value]) => formData.append(key, value));
     return formData;
   }
@@ -614,6 +616,14 @@ function SettingsPanel({ settings, template, updateSetting, updateTemplate }) {
         </div>
 
         <div className="toggle-grid">
+          <label>
+            <input
+              type="checkbox"
+              checked={template.mergePackingList !== false}
+              onChange={(event) => updateTemplate("mergePackingList", event.target.checked)}
+            />
+            Unificar etiqueta + lista
+          </label>
           <label>
             <input
               type="checkbox"
