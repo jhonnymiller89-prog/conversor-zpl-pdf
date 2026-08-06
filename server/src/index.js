@@ -32,7 +32,8 @@ const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || "127.0.0.1";
 const CM_TO_POINTS = 28.3464567;
 const MM_TO_POINTS = 2.83464567;
-const MAX_PREVIEW_LABELS = 200;
+const MAX_FAST_PREVIEW_LABELS = 200;
+const MAX_EXTERNAL_PREVIEW_LABELS = 24;
 const LABELARY_MIN_INTERVAL_MS = 450;
 const LABELARY_MAX_ATTEMPTS = 4;
 const LABEL_PRESETS = {
@@ -93,7 +94,8 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
   try {
     const settings = getConversionSettings(req.body);
     const payload = buildLabelPayload(req);
-    const labelsToPreview = payload.labels.slice(0, MAX_PREVIEW_LABELS);
+    const previewLimit = getPreviewLimit(payload.labels);
+    const labelsToPreview = payload.labels.slice(0, previewLimit);
     const previews = [];
 
     for (let globalIndex = 0; globalIndex < labelsToPreview.length; globalIndex += 1) {
@@ -122,7 +124,7 @@ app.post("/api/preview", upload.array("files", 20), async (req, res) => {
 
     res.json({
       ...toAnalysis(payload),
-      previewLimit: MAX_PREVIEW_LABELS,
+      previewLimit,
       previews
     });
   } catch (error) {
@@ -306,9 +308,11 @@ function extractPrintableLabels(content) {
 
     if (!isPrintableLabel(label)) continue;
 
+    const zpl = localPrefix ? `${localPrefix}\n${label}` : label;
+
     labels.push({
-      zpl: localPrefix ? `${localPrefix}\n${label}` : label,
-      productFooter: extractProductFooter(localPrefix, label)
+      zpl,
+      productFooter: hasEmbeddedZplGraphic(zpl) ? null : extractProductFooter(localPrefix, label)
     });
   }
 
@@ -380,6 +384,11 @@ function buildWarnings(sources, labels) {
   }
 
   return warnings;
+}
+
+function getPreviewLimit(labels) {
+  const canRenderLocally = labels.every((label) => hasEmbeddedZplGraphic(label.zpl));
+  return canRenderLocally ? MAX_FAST_PREVIEW_LABELS : MAX_EXTERNAL_PREVIEW_LABELS;
 }
 
 function getConversionSettings(body) {
@@ -1288,6 +1297,11 @@ function clampNumber(value, min, max) {
 }
 
 async function renderZplToPng(zpl, settings) {
+  const embeddedImage = decodeEmbeddedZplGraphic(zpl);
+  if (embeddedImage) {
+    return encodeRgbaPng(embeddedImage.width, embeddedImage.height, embeddedImage.rgba);
+  }
+
   let lastErrorDetails = "";
 
   for (let attempt = 1; attempt <= LABELARY_MAX_ATTEMPTS; attempt += 1) {
@@ -1327,6 +1341,56 @@ async function renderZplToPng(zpl, settings) {
   error.publicMessage =
     "O renderizador não conseguiu interpretar uma das etiquetas. Verifique o ZPL e tente novamente.";
   throw error;
+}
+
+function encodeRgbaPng(width, height, rgba) {
+  const pixels = Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+
+  const scanlines = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const scanlineOffset = y * (width * 4 + 1);
+    scanlines[scanlineOffset] = 0;
+    pixels.copy(scanlines, scanlineOffset + 1, y * width * 4, (y + 1) * width * 4);
+  }
+
+  return Buffer.concat([
+    Buffer.from("\x89PNG\r\n\x1a\n", "binary"),
+    createPngChunk("IHDR", ihdr),
+    createPngChunk("IDAT", zlib.deflateSync(scanlines)),
+    createPngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
+function createPngChunk(type, data) {
+  const typeBytes = Buffer.from(type);
+  const length = Buffer.alloc(4);
+  const crc = Buffer.alloc(4);
+
+  length.writeUInt32BE(data.length);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])));
+
+  return Buffer.concat([length, typeBytes, data, crc]);
+}
+
+const PNG_CRC_TABLE = new Uint32Array(256).map((_value, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = PNG_CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 async function waitForLabelarySlot() {

@@ -198,6 +198,7 @@ function App() {
 
       setResult(nextResult);
       setHistory((current) => [nextResult, ...current].slice(0, 10));
+      triggerDownload(nextResult.url, nextResult.name);
     });
   }
 
