@@ -23,6 +23,7 @@ import {
 import "./styles.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
+const BRAND_LOGO = "/assets/jm-cosmeticos-logo.png";
 const ACCEPTED_EXTENSIONS = [".zpl", ".txt", ".zip"];
 const PAGE_SIZES = [
   { value: "10x15", label: "10 x 15 cm" },
@@ -410,11 +411,15 @@ function App() {
     <main className="page-shell">
       <section className="workspace">
         <aside className="intro-panel">
-          <span className="eyebrow">Conversor ZPL online</span>
+          <div className="brand-block">
+            <img src={BRAND_LOGO} alt="JM Cosméticos" />
+            <span>JM Logística</span>
+          </div>
+          <span className="eyebrow">Sistema interno</span>
           <h1>ZPL para PDF profissional</h1>
           <p>
-            Envie arquivos, cole ZPL, valide o conteúdo, visualize etiquetas e gere PDFs prontos
-            para impressão térmica.
+            Conversor privado da JM Cosméticos para etiquetas térmicas, listas de separação e
+            PDFs prontos para expedição.
           </p>
 
           <LocalPanel profile={profile} setProfile={setProfile} history={history} setHistory={setHistory} />
@@ -585,12 +590,13 @@ function LoginScreen({ onLogin, error }) {
   return (
     <main className="auth-shell">
       <section className="auth-card" aria-label="Login do conversor ZPL">
+        <img className="auth-logo" src={BRAND_LOGO} alt="JM Cosméticos" />
         <span className="eyebrow">Acesso privado</span>
         <div className="auth-title">
           <LockKeyhole size={26} aria-hidden="true" />
-          <h1>Conversor ZPL</h1>
+          <h1>Conversor ZPL JM</h1>
         </div>
-        <p>Entre com o usuário e senha da empresa para acessar o conversor.</p>
+        <p>Acesso interno da JM Cosméticos para conversão de etiquetas e apoio à expedição.</p>
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <label>
@@ -618,6 +624,9 @@ function LoginScreen({ onLogin, error }) {
             Entrar
           </button>
         </form>
+        <p className="auth-note">
+          Sistema privado e confidencial. Uso exclusivo para colaboradores autorizados.
+        </p>
       </section>
     </main>
   );
