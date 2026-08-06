@@ -1093,7 +1093,13 @@ async function cropCompactChecklistTable(imageBytes, metadata, sharp) {
   const productCrop = safeCrop(metadata, {
     left: Math.floor(metadata.width * 0.025),
     top: tableTop,
-    width: Math.floor(metadata.width * 0.435),
+    width: Math.floor(metadata.width * 0.425),
+    height: tableHeight
+  });
+  const variationCrop = safeCrop(metadata, {
+    left: Math.floor(metadata.width * 0.455),
+    top: tableTop,
+    width: Math.floor(metadata.width * 0.31),
     height: tableHeight
   });
   const quantityCrop = safeCrop(metadata, {
@@ -1103,13 +1109,14 @@ async function cropCompactChecklistTable(imageBytes, metadata, sharp) {
     height: tableHeight
   });
 
-  if (!productCrop || !quantityCrop) return null;
+  if (!productCrop || !variationCrop || !quantityCrop) return null;
 
   const productColumn = await sharp(imageBytes).extract(productCrop).png().toBuffer();
+  const variationColumn = await sharp(imageBytes).extract(variationCrop).png().toBuffer();
   const quantityColumn = await sharp(imageBytes).extract(quantityCrop).png().toBuffer();
-  const gap = 18;
-  const width = productCrop.width + quantityCrop.width + gap;
-  const height = Math.max(productCrop.height, quantityCrop.height);
+  const gap = 8;
+  const width = productCrop.width + variationCrop.width + quantityCrop.width + gap * 2;
+  const height = Math.max(productCrop.height, variationCrop.height, quantityCrop.height);
 
   const compact = await sharp({
     create: {
@@ -1121,7 +1128,8 @@ async function cropCompactChecklistTable(imageBytes, metadata, sharp) {
   })
     .composite([
       { input: productColumn, left: 0, top: 0 },
-      { input: quantityColumn, left: productCrop.width + gap, top: 0 }
+      { input: variationColumn, left: productCrop.width + gap, top: 0 },
+      { input: quantityColumn, left: productCrop.width + variationCrop.width + gap * 2, top: 0 }
     ])
     .png()
     .toBuffer();
