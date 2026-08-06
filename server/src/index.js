@@ -978,6 +978,7 @@ function decodeEmbeddedZplGraphic(zpl) {
     const bitmap = zlib.inflateSync(compressed);
     const height = Math.floor(totalBytes / rowBytes);
     const width = rowBytes * 8;
+    const gray = Buffer.alloc(width * height, 255);
     const rgba = Buffer.alloc(width * height * 4, 255);
 
     for (let y = 0; y < height; y += 1) {
@@ -985,6 +986,7 @@ function decodeEmbeddedZplGraphic(zpl) {
         const byte = bitmap[y * rowBytes + (x >> 3)];
         const isBlack = (byte >> (7 - (x & 7))) & 1;
         const color = isBlack ? 0 : 255;
+        gray[y * width + x] = color;
         const offset = (y * width + x) * 4;
         rgba[offset] = color;
         rgba[offset + 1] = color;
@@ -993,7 +995,7 @@ function decodeEmbeddedZplGraphic(zpl) {
       }
     }
 
-    return { width, height, rgba };
+    return { width, height, gray, rgba };
   } catch (error) {
     console.warn("Não foi possível decodificar a imagem ZPL do checklist:", error?.message || error);
     return null;
@@ -1299,7 +1301,7 @@ function clampNumber(value, min, max) {
 async function renderZplToPng(zpl, settings) {
   const embeddedImage = decodeEmbeddedZplGraphic(zpl);
   if (embeddedImage) {
-    return encodeRgbaPng(embeddedImage.width, embeddedImage.height, embeddedImage.rgba);
+    return encodeGrayscalePng(embeddedImage.width, embeddedImage.height, embeddedImage.gray);
   }
 
   let lastErrorDetails = "";
@@ -1341,6 +1343,29 @@ async function renderZplToPng(zpl, settings) {
   error.publicMessage =
     "O renderizador não conseguiu interpretar uma das etiquetas. Verifique o ZPL e tente novamente.";
   throw error;
+}
+
+function encodeGrayscalePng(width, height, gray) {
+  const pixels = Buffer.from(gray.buffer, gray.byteOffset, gray.byteLength);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 0;
+
+  const scanlines = Buffer.alloc((width + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const scanlineOffset = y * (width + 1);
+    scanlines[scanlineOffset] = 0;
+    pixels.copy(scanlines, scanlineOffset + 1, y * width, (y + 1) * width);
+  }
+
+  return Buffer.concat([
+    Buffer.from("\x89PNG\r\n\x1a\n", "binary"),
+    createPngChunk("IHDR", ihdr),
+    createPngChunk("IDAT", zlib.deflateSync(scanlines, { level: 1 })),
+    createPngChunk("IEND", Buffer.alloc(0))
+  ]);
 }
 
 function encodeRgbaPng(width, height, rgba) {
