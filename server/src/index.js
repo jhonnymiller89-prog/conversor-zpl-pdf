@@ -6,8 +6,9 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import PDFKitDocument from "pdfkit";
 import {
-  PDFDocument,
+  PDFDocument as PDFLibDocument,
   StandardFonts,
   clip,
   degrees,
@@ -198,7 +199,7 @@ app.post("/api/convert-label", upload.array("files", 20), async (req, res) => {
     const payload = buildLabelPayload(req);
     const labelIndex = Math.floor(clampNumber(Number(req.body?.labelIndex ?? 0), 0, payload.labels.length - 1));
     const label = payload.labels[labelIndex];
-    const pdf = await PDFDocument.create();
+    const pdf = await PDFLibDocument.create();
     const pngBytes = await renderZplToPng(label.zpl, settings);
     const image = await pdf.embedPng(pngBytes);
     const page = pdf.addPage([settings.pdfWidth, settings.pdfHeight]);
@@ -255,7 +256,11 @@ function createConversionJob(payload, settings) {
 }
 
 async function createPdfBytes(payload, settings) {
-  const pdf = await PDFDocument.create();
+  if (canUseStreamedPdf(payload, settings)) {
+    return createStreamedPdfBytes(payload, settings);
+  }
+
+  const pdf = await PDFLibDocument.create();
 
   for (const label of payload.labels) {
     const pngBytes = await renderZplToPng(label.zpl, settings);
@@ -265,6 +270,82 @@ async function createPdfBytes(payload, settings) {
   }
 
   return Buffer.from(await pdf.save());
+}
+
+function canUseStreamedPdf(payload, settings) {
+  if (settings.rotation !== 0) return false;
+
+  return payload.labels.every(
+    (label) =>
+      !label.productFooterZpl &&
+      !label.productFooter?.lines?.length &&
+      hasEmbeddedZplGraphic(label.zpl)
+  );
+}
+
+async function createStreamedPdfBytes(payload, settings) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const doc = new PDFKitDocument({
+      autoFirstPage: false,
+      compress: true,
+      bufferPages: false
+    });
+
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("error", reject);
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+
+    (async () => {
+      try {
+        for (const label of payload.labels) {
+          const pngBytes = await renderZplToPng(label.zpl, settings);
+          doc.addPage({
+            size: [settings.pdfWidth, settings.pdfHeight],
+            margin: 0
+          });
+          drawStreamedLabelImage(doc, pngBytes, settings);
+        }
+
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    })();
+  });
+}
+
+function drawStreamedLabelImage(doc, imageBytes, settings) {
+  const embeddedImage = decodePngSize(imageBytes);
+  const pageWidth = settings.pdfWidth;
+  const pageHeight = settings.pdfHeight;
+  const margin = settings.marginPoints;
+  const targetWidth = Math.max(pageWidth - margin * 2, 1);
+  const targetHeight = Math.max(pageHeight - margin * 2, 1);
+  const fitScale = Math.min(targetWidth / embeddedImage.width, targetHeight / embeddedImage.height);
+  const fillScale = Math.max(targetWidth / embeddedImage.width, targetHeight / embeddedImage.height);
+  const scale = settings.scaleMode === "fill" ? fillScale : fitScale;
+  const drawWidth = embeddedImage.width * scale;
+  const drawHeight = embeddedImage.height * scale;
+  const left = margin + (targetWidth - drawWidth) / 2;
+  const top = margin + (targetHeight - drawHeight) / 2;
+
+  doc.image(Buffer.from(imageBytes), left, top, {
+    width: drawWidth,
+    height: drawHeight
+  });
+}
+
+function decodePngSize(imageBytes) {
+  const buffer = Buffer.from(imageBytes);
+  if (buffer.length < 24 || buffer.toString("ascii", 12, 16) !== "IHDR") {
+    throw new Error("Imagem PNG inválida.");
+  }
+
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20)
+  };
 }
 
 function sendPdf(res, pdfBytes, payload, settings) {
